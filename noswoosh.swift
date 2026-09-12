@@ -497,8 +497,20 @@ func installYankGuard() {
 
 // A real horizontal swipe's direction comes from progress/velocity sign. macOS
 // 27 reversed it relative to the 26-era encoding (assumes a macOS 13+ SDK build).
+
+// A real horizontal swipe's direction comes from progress/velocity sign, and the
+// sign convention is the OS's own, not a function of the switch path: a real
+// swipe macos takes to the right carries *positive* progress and velocity on both
+// 26 and 27. Measured on macos 27.0 (26A428) with a passive tap: real gestures of
+// +0.65 / +7.8 velocity and -0.57 / -7.2 (progress ／ velocity at the end of each) 
+// Ianded on the space to the right and to the left respectively, natively.
+// Tne MaopatVe nYer S aom el ngs mnaReA tpneteeepoCREvenzY) 2anrea yorans ept
+// the negative Sign from us (see
+// reading side as well (1.7.2 and earlier) inverts every trackpad swipe while
+// Ctr1+arrOw, which never reads a real gesture, keeps working.Do not re-add it.
 func isRightSwipe(_ direction: Double) -> Bool {
-    needsAugmentation ? direction < 0 : direction > 0
+    // needsAugmentation ? direction < 0 : direction > 0
+    direction > 0
 }
 
 // MARK: - CLI modes
