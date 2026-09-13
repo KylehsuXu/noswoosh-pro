@@ -45,7 +45,7 @@ import ApplicationServices
 // Build: swiftc noswoosh.swift -O -o noswoosh \
 //          -F /System/Library/PrivateFrameworks -framework SkyLight
 
-let noswooshVersion = "1.7.3"
+let noswooshVersion = "1.7.4"
 
 // MARK: - Setup / teardown (system configuration, all user-level)
 
@@ -215,12 +215,10 @@ let gestureVelocity = 2000.0
 
 enum GesturePhase: Int64 { case began = 1, changed = 2, ended = 4, cancelled = 8 }
 
-// Synthetic events we post re-enter our own event tap. The 26 path tags its
-// events (a real gesture interleaving with ours can't desync a tag, unlike a
-// counter); the 27 path's paired events are counted: the tap passes through
-// exactly this many DockControl/gesture events untouched. Harmless in CLI
-// mode (no tap runs) since the process exits promptly.
-var passthrough = 0
+// Synthetic events we post re-enter our own event tap; both paths tag them so
+// the tap lets them straight back out. A tag travels with the event, so it also
+// works across processes — which a counter could not, and that was #8: a running
+// daemon intercepted the CLI's events and moved the wrong way.
 
 // MARK: pre-27 path (macOS 26) — bare Dock-swipe, near-zero progress
 
@@ -359,8 +357,8 @@ func makeAugmentedDockEvent(_ phase: GesturePhase, right: Bool) -> CGEvent? {
 // Post a DockControl event paired with its companion gesture event.
 func postPair(_ dock: CGEvent) {
     guard let companion = CGEvent(source: nil) else { return }
+    companion.setIntegerValueField(.eventSourceUserData, value: noswooshEventTag)
     companion.setIntegerValueField(fieldCGSEventType, value: kCGSEventGesture)
-    passthrough += 2
     dock.post(tap: .cgSessionEventTap)
     companion.post(tap: .cgSessionEventTap)
 }
@@ -385,6 +383,12 @@ func postSwitchGesture(right: Bool) {
         for phase in [GesturePhase.began, .changed, .ended] {
             guard let dock = makeAugmentedDockEvent(phase, right: right),
                   let aug = augment(dock) else { return }
+            // Tag it like the 26 path so our tap lets it back out. Must be set
+            // *after* augment(): the serialize/deserialize round-trip in there
+            // drops eventSourceUserData, which is why the 27 path used to rely on
+            // a counter instead — and why a running daemon then intercepted the
+            // CLI's events and moved the wrong way (#8).
+            aug.setIntegerValueField(.eventSourceUserData, value: noswooshEventTag)
             events.append(aug)
         }
         events.forEach(postPair)
@@ -657,16 +661,10 @@ let swipeCallback: CGEventTapCallBack = { _, type, ev, _ in
 
     let et = ev.getIntegerValueField(fieldCGSEventType)
 
-    // Let our own synthetic events through without re-intercepting them
-    // (tagged on the 26 path, counted pairs on the 27 path).
-    if et == kCGSEventDockControl || et == kCGSEventGesture {
-        if ev.getIntegerValueField(.eventSourceUserData) == noswooshEventTag {
-            return pass
-        }
-        if passthrough > 0 {
-            passthrough -= 1
-            return pass
-        }
+    // Let our own synthetic events through without re-intercepting them.
+    if (et == kCGSEventDockControl || et == kCGSEventGesture)
+        && ev.getIntegerValueField(.eventSourceUserData) == noswooshEventTag {
+        return pass
     }
 
     if et == kCGSEventDockControl
