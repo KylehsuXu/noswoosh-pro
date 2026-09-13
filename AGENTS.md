@@ -56,9 +56,14 @@ and passes those through instead of re-intercepting. If you change how many even
 post emits, update the bump in lockstep or the tap will eat its own output or act on it
 twice.
 
-**macOS 27 reverses swipe direction.** `isRightSwipe` and `makeAugmentedDockEvent` flip
-the progress/velocity sign versus the pre-27 path. If direction is backwards on one OS
-but right on the other, this is why — check the `needsAugmentation` branch, not the
+**On macOS 27 the read and write sides use opposite sign conventions, on purpose.**
+`makeAugmentedDockEvent` must *post* negative-for-right on 27 (positive posts move left —
+confirmed in a 27.0 VM by forcing each sign), while `isRightSwipe` *reads* a real
+gesture, and real trackpad swipes carry positive-for-right on 26 and 27 alike. So only
+the writer branches on `needsAugmentation`; the reader is unconditional. Flipping the
+reader too inverts every trackpad swipe on 27 while Ctrl+arrow keeps working, because the
+hotkey path never reads a real gesture — that was the 1.7.2 bug fixed in #7. If direction
+is backwards on one OS but right on the other, check which *side* you changed, not the
 field constants.
 
 **The daemon must be `.accessory`, not `.prohibited`.** The yank guard works by

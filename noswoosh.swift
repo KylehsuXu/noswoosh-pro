@@ -495,21 +495,22 @@ func installYankGuard() {
     }
 }
 
-// A real horizontal swipe's direction comes from progress/velocity sign. macOS
-// 27 reversed it relative to the 26-era encoding (assumes a macOS 13+ SDK build).
-
-// A real horizontal swipe's direction comes from progress/velocity sign, and the
-// sign convention is the OS's own, not a function of the switch path: a real
-// swipe macos takes to the right carries *positive* progress and velocity on both
-// 26 and 27. Measured on macos 27.0 (26A428) with a passive tap: real gestures of
-// +0.65 / +7.8 velocity and -0.57 / -7.2 (progress ／ velocity at the end of each) 
-// Ianded on the space to the right and to the left respectively, natively.
-// Tne MaopatVe nYer S aom el ngs mnaReA tpneteeepoCREvenzY) 2anrea yorans ept
-// the negative Sign from us (see
-// reading side as well (1.7.2 and earlier) inverts every trackpad swipe while
-// Ctr1+arrOw, which never reads a real gesture, keeps working.Do not re-add it.
+// A real horizontal swipe's direction comes from its progress sign (on .changed)
+// or velocity sign (on .ended). A real trackpad swipe to the right carries
+// *positive* progress and velocity, on 26 and 27 alike — measured on 27.0
+// (26A428) with a passive tap: +0.65 / +7.8 landed one space right, -0.57 / -7.2
+// one space left, natively.
+//
+// This is deliberately NOT the sign we *post* on 27. `makeAugmentedDockEvent`
+// must send negative-for-right there, confirmed in a 27.0 VM: forcing positive
+// progress moved left and negative moved right, twice each. So on 27 the read
+// and write sides use opposite conventions. That asymmetry is real — do not
+// "tidy" it by making them agree.
+//
+// Flipping the reading side too (1.7.2 and earlier) inverts every trackpad swipe,
+// while Ctrl+arrow keeps working because it never reads a real gesture. Don't
+// re-add it.
 func isRightSwipe(_ direction: Double) -> Bool {
-    // needsAugmentation ? direction < 0 : direction > 0
     direction > 0
 }
 
