@@ -52,7 +52,7 @@ import ApplicationServices
 // Build: swiftc noswoosh.swift -O -o noswoosh \
 //          -F /System/Library/PrivateFrameworks -framework SkyLight
 
-let noswooshVersion = "1.8.6"
+let noswooshVersion = "1.8.7"
 
 // MARK: - Setup / teardown (system configuration, all user-level)
 
@@ -397,13 +397,27 @@ var postingAllowed = true
 // the per-display prediction that used to cover rapid presses here was removed for the same
 // reason, since a stale guess posts the same unpostable direction.
 
-// Space the in-flight post started from, or nil when nothing is in flight.
+// Space the in-flight post is heading to, plus the one it started from (the trace and the
+// "did anything move at all" test use it). The *target* is what the confirmation checks: "the
+// list moved off the space we started from" is satisfied by macOS's own switch just as well as
+// by ours — the follow rule moves the same space whenever an app orders a window in — and then
+// the next post is computed from an index nobody verified. Only the space we aimed at is
+// evidence that our gesture landed.
+var postedTarget: UInt64?
 var postedFrom: UInt64?
 var postedAt = Date.distantPast
-// A healthy commit takes ~38ms. Past this the swipe was dropped rather than merely slow; the
-// follow rule needs ~320ms to pull the same switch off natively, so giving up here still leaves
-// room to re-post from a read we can trust again.
+// A healthy commit takes ~38ms. Past this the swipe was dropped, or the Dock's gesture engine is
+// refusing synthetic swipes outright — it does that for seconds at a time (measured on 27.0:
+// eight refusals in seven seconds after a 40-activation burst, with the space list reading
+// correctly throughout, i.e. a refusal and not a clamp). The follow rule needs ~320ms to move the
+// same switch natively, so giving up here still leaves room to retry from a read we can trust.
 let postCommitTimeout = 0.3
+// Consecutive posts that never reached their target. The engine does not come back sooner for
+// being asked again, and every extra post in that window is another chance to hand the Dock a
+// swipe it has to clamp (a black screen), so after the second one we back off instead.
+var refusedPosts = 0
+var postingPausedUntil = Date.distantPast
+let refusalCooldown = 1.0
 
 // Parked requests. A relative one (Ctrl+arrow, a real swipe) accumulates as net steps — holding
 // the key is a press every ~33ms on the default repeat rate and each press is one space, so
@@ -421,22 +435,42 @@ func listShows(_ space: UInt64) -> Bool {
 }
 
 // False while the Dock has not committed the last post yet: the caller must not compute a
-// direction from the list until this is true. Clears the record once it has, and on the timeout
-// above, so a dropped swipe cannot wedge the daemon into never posting again. An unreadable
-// list counts as caught up — posting blind is what upstream always did there, and blocking
-// forever would silently disable every switch.
+// direction from the list until this is true. The record is cleared once the list shows the space
+// we aimed at, once it shows something else entirely (macOS got there first — nothing of ours is
+// in flight any more), and on the timeout above, so a dropped swipe cannot wedge the daemon into
+// never posting again. An unreadable list counts as caught up — posting blind is what upstream
+// always did there, and blocking forever would silently disable every switch.
 func dockCaughtUp() -> Bool {
-    guard let from = postedFrom else { return true }
-    if listShows(from) {
-        guard Date().timeIntervalSince(postedAt) > postCommitTimeout else { return false }
-        log("switch posted \(Int(postCommitTimeout * 1000))ms ago never committed (swipe dropped)")
+    if Date() < postingPausedUntil { return false }
+    guard let target = postedTarget else { return true }
+    if listShows(target) {
+        refusedPosts = 0
+        postedTarget = nil; postedFrom = nil
+        return true
     }
-    postedFrom = nil
+    if Date().timeIntervalSince(postedAt) < postCommitTimeout { return false }
+    let from = postedFrom
+    postedTarget = nil; postedFrom = nil
+    if let from, listShows(from) {
+        // Nothing moved at all: the Dock dropped our swipe, or is refusing them wholesale.
+        refusedPosts += 1
+        log("switch posted \(Int(postCommitTimeout * 1000))ms ago never reached \(target) — the Dock refused it (\(refusedPosts) in a row)")
+        if refusedPosts >= 2 {
+            postingPausedUntil = Date().addingTimeInterval(refusalCooldown)
+            log("the Dock is refusing synthetic swipes — pausing \(Int(refusalCooldown * 1000))ms instead of posting into it")
+            return false
+        }
+        return true
+    }
+    // The space moved somewhere else: macOS's own switch got there first (or a second display
+    // took the gesture). Our aim is moot and nothing of ours is in flight — let the caller re-read.
+    refusedPosts = 0
     return true
 }
 
-func notePost(from space: UInt64) {
+func notePost(from space: UInt64, to target: UInt64) {
     postedFrom = space
+    postedTarget = target
     postedAt = Date()
 }
 
@@ -508,7 +542,7 @@ func applySteps(_ steps: Int) {
     guard clamped != 0 else { return }
     switchTrace("\(abs(clamped)) step(s) \(clamped > 0 ? "right" : "left") from \(info.ids[info.currentIndex]) at list index \(info.currentIndex) of \(info.ids.count)\(clamped != steps ? " (parked \(steps) clamped to the list)" : "")")
     for _ in 0..<abs(clamped) { postSwitchGesture(right: clamped > 0) }
-    notePost(from: info.ids[info.currentIndex])
+    notePost(from: info.ids[info.currentIndex], to: info.ids[info.currentIndex + clamped])
 }
 
 func postSwitchGesture(right: Bool) {
@@ -686,12 +720,16 @@ func preemptAppActivationSpace(_ app: NSRunningApplication) {
         preemptTrace(app, "nothing to do: already on \(target) (list index \(info.currentIndex) of \(info.ids.count))")
         return
     }
-    guard let psn = psn(for: pid) else {
-        preemptTrace(app, "no PSN for pid \(pid)")
-        return
+    // `SLSSpaceSetFrontPSN` repoints the activation's own space target at the space we just
+    // switched to. It is not what makes the switch instant (a single-display A/B measured no
+    // difference with it removed), so a pid whose PSN cannot be resolved must not cost us the
+    // whole switch — skip that one call and post the gesture anyway.
+    if let psn = psn(for: pid) {
+        _ = SLSSpaceSetFrontPSN(cid, target, psn)
+    } else {
+        preemptTrace(app, "no PSN for pid \(pid) — skipping SLSSpaceSetFrontPSN, posting the gesture anyway")
     }
     let steps = index - info.currentIndex
-    _ = SLSSpaceSetFrontPSN(cid, target, psn)
     preemptTrace(app, "\(info.ids[info.currentIndex]) -> \(target): \(abs(steps)) step(s) \(steps > 0 ? "right" : "left"), list index \(info.currentIndex) of \(info.ids.count)")
     // One gesture per space of travel: a Dock swipe moves exactly one space. Posted as
     // a burst, and like the Ctrl+arrow path they are tagged/counted so our own tap
@@ -699,7 +737,7 @@ func preemptAppActivationSpace(_ app: NSRunningApplication) {
     // burst is one request against the gate above: it starts from an index the Dock confirms,
     // and each gesture lands one space on from the last, so the last one lands on the target.
     for _ in 0..<abs(steps) { postSwitchGesture(right: steps > 0) }
-    notePost(from: info.ids[info.currentIndex])
+    notePost(from: info.ids[info.currentIndex], to: target)
 }
 
 func installAppActivationPreempt() {
@@ -868,6 +906,9 @@ func installLaunchAgent() {
 
 // MARK: - CLI modes
 
+// One place to keep the usage line honest — it is printed by --help and by an unknown argument.
+let usage = "usage: noswoosh-pro [left | right | list | setup | teardown | version | help]"
+
 let args = CommandLine.arguments
 if args.count > 1 {
     switch args[1] {
@@ -912,11 +953,14 @@ if args.count > 1 {
         setCtrlArrowShortcuts(enabled: true)
         print("noswoosh-pro teardown complete: system Ctrl+arrow shortcuts re-enabled.")
         exit(0)
-    case "version", "--version":
+    case "version", "--version", "-v":
         print("noswoosh-pro \(noswooshVersion)")
         exit(0)
+    case "help", "--help", "-h":
+        print(usage)
+        exit(0)
     default:
-        FileHandle.standardError.write("usage: noswoosh-pro [left | right | list | setup | teardown | version]\n".data(using: .utf8)!)
+        FileHandle.standardError.write("\(usage)\n".data(using: .utf8)!)
         exit(1)
     }
 }
@@ -1124,8 +1168,10 @@ if let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventT
     CGEvent.tapEnable(tap: tap, enable: true)
     // The callback re-enables the tap when the system disables it, but a disable
     // can arrive without a callback under load. Poll as a backstop so swipes never
-    // silently die until the next relaunch.
-    Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { _ in
+    // silently die until the next relaunch — and keep it short: until the tap is back a
+    // swipe falls through to the Dock and switches with the native animation, so this timer
+    // bounds how long that can last.
+    Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
         if AXIsProcessTrusted(), !CGEvent.tapIsEnabled(tap: tap) {
             CGEvent.tapEnable(tap: tap, enable: true)
             log("re-enabled swipe event tap")
