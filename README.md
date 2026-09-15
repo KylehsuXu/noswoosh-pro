@@ -27,8 +27,18 @@ Motion.
 brew install --cask KylehsuXu/tap/noswoosh-pro
 ```
 
-This installs `noswoosh.app`, runs the one-time system configuration, and starts a
-login daemon.
+Homebrew 7 refuses third-party taps until you trust them:
+
+```sh
+brew trust --cask KylehsuXu/tap/noswoosh-pro
+brew install --cask KylehsuXu/tap/noswoosh-pro
+noswoosh-pro setup
+```
+
+`noswoosh-pro setup` is the one-time system configuration — it disables the animated
+Ctrl+arrow shortcuts and installs the login daemon. It has to be a separate command
+because Homebrew sandboxes cask install steps: a `postflight` that ran it died with
+SIGKILL there, and the hotkeys stayed enabled.
 
 Then **grant Accessibility permission** — macOS gates synthetic events behind it, and
 it's the one step that can't be scripted. Approve the prompt on first start; if you
