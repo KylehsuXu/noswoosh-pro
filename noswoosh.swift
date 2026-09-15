@@ -52,7 +52,7 @@ import ApplicationServices
 // Build: swiftc noswoosh.swift -O -o noswoosh \
 //          -F /System/Library/PrivateFrameworks -framework SkyLight
 
-let noswooshVersion = "1.8.3"
+let noswooshVersion = "1.8.4"
 
 // MARK: - Setup / teardown (system configuration, all user-level)
 
@@ -374,6 +374,21 @@ func postPair(_ dock: CGEvent) {
     companion.post(tap: .cgSessionEventTap)
 }
 
+// Two reads of the same truth: the per-display list (what a switch is computed against) and
+// SLSGetActiveSpace (the keyboard-focus one). When they disagree the list is mid-update, and a
+// gesture posted now would be computed from an index that no longer matches where the Dock
+// thinks it is — at the ends of the list that means a swipe the Dock has to clamp, which on
+// macOS 27 blanks the screen for a few hundred ms and can leave the gesture engine refusing
+// swipes altogether until a logout. Skipping one switch costs the animation for that one
+// press; posting into that window costs the whole session. Only checked with a single space
+// list: with "Displays have separate Spaces" the two APIs answer for different displays.
+func listIsSettled(_ info: SpaceInfo) -> Bool {
+    let displays = SLSCopyManagedDisplaySpaces(cid).takeRetainedValue() as! [[String: Any]]
+    guard displays.count <= 1 else { return true }
+    guard info.currentIndex >= 0, info.currentIndex < info.ids.count else { return true }
+    return SLSGetActiveSpace(cid) == info.ids[info.currentIndex]
+}
+
 // MARK: - Switch core (both input sources call only this)
 
 // The gesture commits asynchronously, so on rapid presses the space list can be
@@ -385,6 +400,8 @@ var predictionTime = Date.distantPast
 let predictionWindow = needsAugmentation ? 0.4 : 0.25
 
 func postSwitchGesture(right: Bool) {
+    // Gate on the daemon's own posting grant: see postingAllowed.
+    guard postingAllowed else { return }
     // A began/changed/ended sequence must complete; a partial one leaves the Dock
     // mid-gesture on a blank space. On the 27 path, build all three augmented
     // events up front and post nothing if any fails to build, so we never emit a
@@ -558,6 +575,10 @@ func preemptAppActivationSpace(_ app: NSRunningApplication) {
     }
     guard let psn = psn(for: pid) else {
         preemptTrace(app, "no PSN for pid \(pid)")
+        return
+    }
+    guard listIsSettled(info) else {
+        preemptTrace(app, "space list is mid-update (list \(info.ids[info.currentIndex]) vs active \(SLSGetActiveSpace(cid))) — leaving this one to macOS")
         return
     }
     let steps = index - info.currentIndex
@@ -858,26 +879,43 @@ if !AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary) {
     }
 }
 
+// Whether *this* process may post synthetic events ("Device Control and Data Access",
+// kTCCServicePostEvent — a separate grant from Accessibility on current macOS). Without it a
+// posted switch is dropped with no error, and on current macOS each dropped attempt also
+// re-raises the system prompt: for a daemon that posts on every app activation that is a
+// permission dialog per keystroke, which is what the user sees.
+//
+// CGPreflightPostEventAccess answers for the process's own record, which is the right question
+// only when we are our own responsible process — i.e. launchd started us (ppid 1). Started
+// from a shell instead, the grant is inherited from the terminal and preflight reports "no"
+// for posts that in fact work (verified: the CLI's posts land while preflight is false), so
+// there the flag is left alone rather than gating a working setup into silence.
+var postingAllowed = true
+
+
 // Posting synthetic events is a *separate* grant from Accessibility on current macOS — the
 // "Device Control and Data Access" pane (kTCCServicePostEvent). Without it every posted event
 // is dropped *and* each attempt re-raises the system prompt, so the app reads as one begging
 // for permission in a loop while the space switches that reach the Dock are just the native
 // ones. Ask once, then wait like the Accessibility gate above rather than posting into a wall.
-if !CGPreflightPostEventAccess() {
-    log("waiting for \"Device Control and Data Access\" permission (System Settings > Privacy & Security > 设备控制和数据访问)")
+postingAllowed = getppid() != 1 || CGPreflightPostEventAccess()
+if !postingAllowed {
+    log("waiting for \"Device Control and Data Access\" permission — System Settings > Privacy & Security > 设备控制和数据访问 (until then switches stay native)")
     _ = CGRequestPostEventAccess()
     var secondsWaited = 0
     var openedSettings = false
+    // Poll rather than exit: every posting path reads `postingAllowed`, so a grant starts
+    // working within a second and no restart is needed.
     Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
         if CGPreflightPostEventAccess() {
-            log("event-posting permission granted — restarting to apply it")
-            exit(0)
+            postingAllowed = true
+            log("event-posting permission granted")
         }
         secondsWaited += 1
         if secondsWaited == 15, !openedSettings {
             openedSettings = true
-            let pane = "x-apple.systempreferences:com.apple.preference.security"
-            if let url = URL(string: pane), NSWorkspace.shared.open(url) {
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security"),
+               NSWorkspace.shared.open(url) {
                 log("opened System Settings > Privacy & Security")
             }
         }
