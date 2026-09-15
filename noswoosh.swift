@@ -2,6 +2,13 @@ import Cocoa
 import Carbon.HIToolbox
 import ApplicationServices
 
+// noswoosh-pro — instant macOS space switching, forked from mmathys/noswoosh.
+//
+// Upstream switches spaces instantly (Ctrl+arrow, 3-finger swipe). This fork adds one
+// thing: activating an app whose window lives on another space — Cmd+Tab, a Dock icon
+// click, any `open -b` hotkey — arrives instantly too, by preempting that space before
+// the app orders its window in. See the app-activation preempt section below.
+//
 // noswoosh — instant macOS space switching (verified on macOS 26 and 27, Apple Silicon).
 //
 //   noswoosh            daemon: Ctrl+Left/Right OR a 3-finger swipe switch
@@ -45,7 +52,7 @@ import ApplicationServices
 // Build: swiftc noswoosh.swift -O -o noswoosh \
 //          -F /System/Library/PrivateFrameworks -framework SkyLight
 
-let noswooshVersion = "1.7.5"
+let noswooshVersion = "1.8.0"
 
 // MARK: - Setup / teardown (system configuration, all user-level)
 
@@ -725,21 +732,21 @@ if args.count > 1 {
             _ = runTool("/usr/bin/killall", ["Dock"])
         }
         print("""
-        noswoosh setup complete:
+        noswoosh-pro setup complete:
           - system animated Ctrl+arrow shortcuts disabled (live + persisted)
-        Remaining: start the daemon (brew services start noswoosh, or the
-        LaunchAgent from install.sh) and grant it Accessibility permission.
+        Remaining: start the daemon (the cask installs and starts it; from source use the
+        LaunchAgent that install.sh writes) and grant it Accessibility permission.
         """)
         exit(0)
     case "teardown":
         setCtrlArrowShortcuts(enabled: true)
-        print("noswoosh teardown complete: system Ctrl+arrow shortcuts re-enabled.")
+        print("noswoosh-pro teardown complete: system Ctrl+arrow shortcuts re-enabled.")
         exit(0)
     case "version", "--version":
-        print("noswoosh \(noswooshVersion)")
+        print("noswoosh-pro \(noswooshVersion)")
         exit(0)
     default:
-        FileHandle.standardError.write("usage: noswoosh [left | right | list | setup | teardown | version]\n".data(using: .utf8)!)
+        FileHandle.standardError.write("usage: noswoosh-pro [left | right | list | setup | teardown | version]\n".data(using: .utf8)!)
         exit(1)
     }
 }
@@ -747,7 +754,7 @@ if args.count > 1 {
 // MARK: - Daemon mode
 
 func log(_ message: String) {
-    FileHandle.standardError.write("noswoosh: \(message)\n".data(using: .utf8)!)
+    FileHandle.standardError.write("noswoosh-pro: \(message)\n".data(using: .utf8)!)
 }
 
 // Accessibility trust is evaluated when the process starts and cached for its
