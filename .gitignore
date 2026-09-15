@@ -4,3 +4,4 @@ noswoosh-ctrl-arrows
 *.o
 .DS_Store
 build/
+.idea/

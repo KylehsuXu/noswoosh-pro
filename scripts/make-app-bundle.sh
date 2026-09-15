@@ -1,5 +1,5 @@
 #!/bin/bash
-# Assembles noswoosh.app around the noswoosh binary. Builds the binary first
+# Assembles noswoosh-pro.app around the noswoosh-pro binary. Builds the binary first
 # unless --binary is given. Signing is opt-in: without an identity the bundle
 # keeps swiftc's ad-hoc signature.
 set -euo pipefail
@@ -26,19 +26,19 @@ fi
 
 BUILD_TMP=""
 if [ -z "$BINARY" ]; then
-    echo "==> Building noswoosh $VERSION"
+    echo "==> Building noswoosh-pro $VERSION"
     BUILD_TMP=$(mktemp -d)
-    swiftc noswoosh.swift -O -o "$BUILD_TMP/noswoosh" \
+    swiftc noswoosh.swift -O -o "$BUILD_TMP/noswoosh-pro" \
         -F /System/Library/PrivateFrameworks -framework SkyLight
-    BINARY="$BUILD_TMP/noswoosh"
+    BINARY="$BUILD_TMP/noswoosh-pro"
 fi
 
-APP="$OUT_DIR/noswoosh.app"
+APP="$OUT_DIR/noswoosh-pro.app"
 echo "==> Assembling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BINARY" "$APP/Contents/MacOS/noswoosh"
-chmod +x "$APP/Contents/MacOS/noswoosh"
+cp "$BINARY" "$APP/Contents/MacOS/noswoosh-pro"
+chmod +x "$APP/Contents/MacOS/noswoosh-pro"
 sed "s/@VERSION@/$VERSION/g" scripts/Info.plist.in > "$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
@@ -57,7 +57,7 @@ if [ -n "$BUILD_TMP" ]; then rm -rf "$BUILD_TMP"; fi
 
 if [ -n "$IDENTITY" ]; then
     echo "==> Codesigning with $IDENTITY"
-    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP/Contents/MacOS/noswoosh"
+    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP/Contents/MacOS/noswoosh-pro"
     codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
     codesign --verify --strict --verbose=2 "$APP"
 else

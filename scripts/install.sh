@@ -1,13 +1,13 @@
 #!/bin/bash
-# noswoosh installer: builds from source, disables the system's animated
+# noswoosh-pro installer: builds from source, disables the system's animated
 # Ctrl+arrow shortcuts, and installs a login LaunchAgent.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BIN_DIR="$HOME/.local/bin"
-LABEL="ax.max.noswoosh"
+LABEL="xu.max.noswoosh-pro"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-LOG="$HOME/Library/Logs/noswoosh.log"
+LOG="$HOME/Library/Logs/noswoosh-pro.log"
 
 if ! command -v swiftc >/dev/null; then
     echo "swiftc not found — install the Xcode Command Line Tools first:"
@@ -15,8 +15,8 @@ if ! command -v swiftc >/dev/null; then
     exit 1
 fi
 
-echo "==> Building noswoosh"
-swiftc noswoosh.swift -O -o noswoosh \
+echo "==> Building noswoosh-pro"
+swiftc noswoosh.swift -O -o noswoosh-pro \
     -F /System/Library/PrivateFrameworks -framework SkyLight
 
 # Opt-in: a stable Developer ID signature keeps the Accessibility grant across
@@ -24,7 +24,7 @@ swiftc noswoosh.swift -O -o noswoosh \
 if [ -n "${NOSWOOSH_SIGN_IDENTITY:-}" ]; then
     echo "==> Codesigning with $NOSWOOSH_SIGN_IDENTITY"
     codesign --force --options runtime --timestamp \
-        --sign "$NOSWOOSH_SIGN_IDENTITY" noswoosh
+        --sign "$NOSWOOSH_SIGN_IDENTITY" noswoosh-pro
 fi
 
 echo "==> Installing to $BIN_DIR"
@@ -35,11 +35,11 @@ mkdir -p "$BIN_DIR"
 # inode — including fresh ones. The file verifies fine with `codesign -v`, which
 # makes it a memorable afternoon. A fresh inode avoids it entirely.
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-rm -f "$BIN_DIR/noswoosh"
-cp noswoosh noswoosh.swift "$BIN_DIR/"
+rm -f "$BIN_DIR/noswoosh-pro"
+cp noswoosh-pro noswoosh.swift "$BIN_DIR/"
 
 echo "==> Configuring system (disables the animated Ctrl+arrow shortcuts)"
-"$BIN_DIR/noswoosh" setup
+"$BIN_DIR/noswoosh-pro" setup
 
 echo "==> Installing LaunchAgent $LABEL"
 mkdir -p "$HOME/Library/LaunchAgents"
@@ -52,7 +52,7 @@ cat > "$PLIST" <<EOF
     <string>$LABEL</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$BIN_DIR/noswoosh</string>
+        <string>$BIN_DIR/noswoosh-pro</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -77,7 +77,7 @@ Done. One manual step remains:
 
   Grant Accessibility permission (macOS will prompt, or add it yourself):
   System Settings > Privacy & Security > Accessibility
-    > "+" > Cmd+Shift+G > $BIN_DIR/noswoosh
+    > "+" > Cmd+Shift+G > $BIN_DIR/noswoosh-pro
 
   Then restart the daemon:
     launchctl kickstart -k gui/\$(id -u)/$LABEL

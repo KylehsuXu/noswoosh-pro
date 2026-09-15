@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>ax.max.noswoosh</string>
+    <string>xu.max.noswoosh-pro</string>
     <key>CFBundleName</key>
-    <string>noswoosh</string>
+    <string>noswoosh-pro</string>
     <key>CFBundleExecutable</key>
-    <string>noswoosh</string>
+    <string>noswoosh-pro</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>

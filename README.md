@@ -1,11 +1,22 @@
-# noswoosh
+# noswoosh-pro
+
+> **Fork.** `noswoosh-pro` is [KylehsuXu](https://github.com/KylehsuXu)'s fork of
+> [mmathys/noswoosh](https://github.com/mmathys/noswoosh). Upstream already makes
+> **Ctrl+←/→ and 3-finger swipes** instant; this fork adds one thing on top: switching to an
+> app whose window lives on another space — **Cmd+Tab**, a Dock icon click, any `open -b`
+> hotkey — also arrives instantly, by moving to that space before the app orders its window
+> in. Everything else is upstream's work, kept in sync with `git merge upstream/main`.
+>
+> ```sh
+> brew install --cask KylehsuXu/tap/noswoosh-pro
+> ```
 
 Instant, animation-free switching between macOS Spaces (**3-finger swipe** or
 **Ctrl+←/→**). Works on **macOS 26.6+ and 27**, no SIP disabling, no global Reduce
 Motion.
 
-[![Latest release](https://img.shields.io/github/v/release/mmathys/noswoosh?color=blue)](https://github.com/mmathys/noswoosh/releases/latest)
-[![MIT license](https://img.shields.io/github/license/mmathys/noswoosh?color=blue)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/KylehsuXu/noswoosh?color=blue)](https://github.com/KylehsuXu/noswoosh/releases/latest)
+[![MIT license](https://img.shields.io/github/license/KylehsuXu/noswoosh?color=blue)](LICENSE)
 ![macOS 26.6+ / 27](https://img.shields.io/badge/macOS-26.6%2B%20%2F%2027-lightgrey)
 
 ![Side-by-side: the macOS space-switch animation versus noswoosh switching instantly](assets/demo.gif)
@@ -13,7 +24,7 @@ Motion.
 ## Install
 
 ```sh
-brew install --cask mmathys/tap/noswoosh
+brew install --cask KylehsuXu/tap/noswoosh-pro
 ```
 
 This installs `noswoosh.app`, runs the one-time system configuration, and starts a
@@ -38,9 +49,9 @@ cd noswoosh
 ./scripts/install.sh
 ```
 
-The installer compiles `noswoosh.swift` to `~/.local/bin/`, runs `noswoosh setup`, and
-installs a LaunchAgent (`ax.max.noswoosh`) that logs to `~/Library/Logs/noswoosh.log`.
-Grant Accessibility to `~/.local/bin/noswoosh`.
+The installer compiles `noswoosh.swift` to `~/.local/bin/`, runs `noswoosh-pro setup`, and
+installs a LaunchAgent (`xu.max.noswoosh-pro`) that logs to `~/Library/Logs/noswoosh-pro.log`.
+Grant Accessibility to `~/.local/bin/noswoosh-pro`.
 
 Set `NOSWOOSH_SIGN_IDENTITY="Developer ID Application: ..."` to codesign the local
 build, which keeps the grant across rebuilds.
@@ -65,15 +76,15 @@ separate Spaces" off, all displays share one set and move together.
 A CLI is available for scripting and debugging:
 
 ```sh
-noswoosh list      # "space 2 of 4"
-noswoosh right     # switch once and exit
-noswoosh left
-noswoosh setup     # apply system config (teardown reverses it)
-noswoosh teardown
-noswoosh version
+noswoosh-pro list      # "space 2 of 4"
+noswoosh-pro right     # switch once and exit
+noswoosh-pro left
+noswoosh-pro setup     # apply system config (teardown reverses it)
+noswoosh-pro teardown
+noswoosh-pro version
 ```
 
-For a custom shortcut, bind `noswoosh left` / `noswoosh right` in any hotkey tool that
+For a custom shortcut, bind `noswoosh-pro left` / `noswoosh-pro right` in any hotkey tool that
 runs a command — [skhd](https://github.com/koekeishiya/skhd),
 [Karabiner-Elements](https://karabiner-elements.pqrs.org),
 [Hammerspoon](https://www.hammerspoon.org) or [Raycast](https://www.raycast.com). The
@@ -201,7 +212,7 @@ based on most recent use" in System Settings → Desktop & Dock.
 ## Uninstall
 
 ```sh
-brew uninstall --cask noswoosh     # or: ./scripts/uninstall.sh, from source
+brew uninstall --cask noswoosh-pro     # or: ./scripts/uninstall.sh, from source
 ```
 
 This stops the daemon, removes the LaunchAgent, and restores the system Ctrl+arrow

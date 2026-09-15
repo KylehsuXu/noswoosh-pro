@@ -1,10 +1,14 @@
 # Release pipeline: tag vX.Y.Z (matching noswooshVersion in noswoosh.swift) and push.
-# Builds the binary, assembles noswoosh.app, signs + notarizes + staples both, attaches
-# them to the GitHub Release, and bumps the cask in mmathys/homebrew-tap.
+# Builds the binary, assembles noswoosh-pro.app, signs + notarizes + staples both, attaches
+# them to the GitHub Release, and bumps the cask in KylehsuXu/homebrew-tap.
 #
 # Secrets: DEVELOPER_ID_CERT_P12_BASE64, DEVELOPER_ID_CERT_PASSWORD, CI_KEYCHAIN_PASSWORD,
 # DEVELOPER_ID_SIGN_IDENTITY, ASC_API_KEY_ID, ASC_API_ISSUER_ID, ASC_API_KEY_P8_BASE64,
-# and HOMEBREW_TAP_TOKEN (fine-grained PAT, Contents:write on mmathys/homebrew-tap).
+# and HOMEBREW_TAP_TOKEN (fine-grained PAT, Contents:write on KylehsuXu/homebrew-tap).
+# This fork has no signing secrets yet, so releases are ad-hoc signed: Gatekeeper is fine
+# (Homebrew's curl download carries no quarantine flag), but the Accessibility grant is
+# keyed to the ad-hoc cdhash, so every release needs the checkbox ticked again. The cask
+# bump below is skipped in that case — update Casks/noswoosh-pro.rb by hand.
 # Each group is optional: missing signing secrets skip signing, missing ASC secrets skip
 # notarization, a missing tap token skips the cask bump. The build always runs.
 name: Release
@@ -68,7 +72,7 @@ jobs:
 
       - name: Build binary
         run: |
-          swiftc noswoosh.swift -O -o noswoosh \
+          swiftc noswoosh.swift -O -o noswoosh-pro \
             -F /System/Library/PrivateFrameworks -framework SkyLight
 
       - name: Sign binary
@@ -76,13 +80,13 @@ jobs:
         env:
           IDENTITY: ${{ secrets.DEVELOPER_ID_SIGN_IDENTITY }}
         run: |
-          codesign --force --options runtime --timestamp --sign "$IDENTITY" noswoosh
-          codesign --verify --strict --verbose=2 noswoosh
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" noswoosh-pro
+          codesign --verify --strict --verbose=2 noswoosh-pro
 
       - name: Assemble app bundle
         env:
           NOSWOOSH_SIGN_IDENTITY: ${{ steps.signing.outputs.enabled == 'true' && secrets.DEVELOPER_ID_SIGN_IDENTITY || '' }}
-        run: ./scripts/make-app-bundle.sh --binary ./noswoosh --out build
+        run: ./scripts/make-app-bundle.sh --binary ./noswoosh-pro --out build
 
       - name: Notarize app bundle
         if: steps.signing.outputs.can_notarize == 'true'
@@ -92,19 +96,19 @@ jobs:
           ASC_ISSUER: ${{ secrets.ASC_API_ISSUER_ID }}
         run: |
           echo "$ASC_KEY" | base64 --decode > "$RUNNER_TEMP/asc.p8"
-          ditto -c -k --keepParent build/noswoosh.app "$RUNNER_TEMP/notarize.zip"
+          ditto -c -k --keepParent build/noswoosh-pro.app "$RUNNER_TEMP/notarize.zip"
           xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
             --key "$RUNNER_TEMP/asc.p8" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER" --wait
-          xcrun stapler staple build/noswoosh.app
+          xcrun stapler staple build/noswoosh-pro.app
           rm -f "$RUNNER_TEMP/asc.p8" "$RUNNER_TEMP/notarize.zip"
 
       - name: Package artifacts
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          zip -j "noswoosh-$VERSION-macos.zip" noswoosh
-          ditto -c -k --keepParent build/noswoosh.app "noswoosh-$VERSION.app.zip"
-          shasum -a 256 "noswoosh-$VERSION-macos.zip" "noswoosh-$VERSION.app.zip"
+          zip -j "noswoosh-pro-$VERSION-macos.zip" noswoosh-pro
+          ditto -c -k --keepParent build/noswoosh-pro.app "noswoosh-pro-$VERSION.app.zip"
+          shasum -a 256 "noswoosh-pro-$VERSION-macos.zip" "noswoosh-pro-$VERSION.app.zip"
 
       - name: Upload to release
         env:
@@ -114,7 +118,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes \
             || echo "release already exists, uploading assets"
           gh release upload "$GITHUB_REF_NAME" \
-            "noswoosh-$VERSION-macos.zip" "noswoosh-$VERSION.app.zip" --clobber
+            "noswoosh-pro-$VERSION-macos.zip" "noswoosh-pro-$VERSION.app.zip" --clobber
 
       - name: Bump cask in homebrew-tap
         if: steps.signing.outputs.can_notarize == 'true'
@@ -124,28 +128,28 @@ jobs:
         run: |
           if [ -z "$TAP_TOKEN" ]; then
             echo "HOMEBREW_TAP_TOKEN not set — skipping cask bump."
-            echo "Update Casks/noswoosh.rb in mmathys/homebrew-tap by hand."
+            echo "Update Casks/noswoosh-pro.rb in KylehsuXu/homebrew-tap by hand."
             exit 0
           fi
-          sha=$(shasum -a 256 "noswoosh-$VERSION.app.zip" | cut -d' ' -f1)
+          sha=$(shasum -a 256 "noswoosh-pro-$VERSION.app.zip" | cut -d' ' -f1)
           git clone --depth=1 \
-            "https://x-access-token:$TAP_TOKEN@github.com/mmathys/homebrew-tap.git" tap
+            "https://x-access-token:$TAP_TOKEN@github.com/KylehsuXu/homebrew-tap.git" tap
           cd tap
           sed -i '' \
             -e "s|^  version \".*\"$|  version \"$VERSION\"|" \
             -e "s|^  sha256 \".*\"$|  sha256 \"$sha\"|" \
-            Casks/noswoosh.rb
+            Casks/noswoosh-pro.rb
           if git diff --quiet; then
             echo "Cask already up to date."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -qam "noswoosh $VERSION"
+          git commit -qam "noswoosh-pro $VERSION"
           # The release is already published by now, so a tap push failure (bad or
           # expired token) must not mark the release itself as failed — warn instead.
           if git push; then
             echo "Cask bumped to $VERSION ($sha)."
           else
-            echo "::warning::Could not push the cask bump — check HOMEBREW_TAP_TOKEN. Set version=$VERSION sha256=$sha in mmathys/homebrew-tap by hand."
+            echo "::warning::Could not push the cask bump — check HOMEBREW_TAP_TOKEN. Set version=$VERSION sha256=$sha in KylehsuXu/homebrew-tap by hand."
           fi

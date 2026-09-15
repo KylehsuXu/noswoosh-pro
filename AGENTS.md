@@ -1,4 +1,9 @@
-# Working on noswoosh
+# Working on noswoosh-pro
+
+Fork of [mmathys/noswoosh](https://github.com/mmathys/noswoosh). Same one Swift file
+(`noswoosh.swift`), bundle script, and release workflow; the product, app bundle, CLI,
+bundle id (`xu.max.noswoosh-pro`) and LaunchAgent label are renamed, and one feature is
+added: the app-activation preempt. Keep this file in sync with upstream's when merging.
 
 One Swift file (`noswoosh.swift`), a bundle script, and a release workflow. Read the
 source comments first — they explain the technique. This file covers only what the
@@ -17,18 +22,23 @@ pre-27 path *should* handle but nobody has tested.
 ## Build and release
 
 ```sh
-swiftc noswoosh.swift -O -o noswoosh -F /System/Library/PrivateFrameworks -framework SkyLight
-./scripts/make-app-bundle.sh --out build     # assembles noswoosh.app
+swiftc noswoosh.swift -O -o noswoosh-pro -F /System/Library/PrivateFrameworks -framework SkyLight
+./scripts/make-app-bundle.sh --out build     # assembles noswoosh-pro.app
 ```
 
 Releasing is a tag push: bump `noswooshVersion` in `noswoosh.swift`, then
-`git tag vX.Y.Z && git push origin vX.Y.Z`. CI builds, signs, notarizes, staples,
-publishes, and bumps the cask in `mmathys/homebrew-tap`. The workflow header lists the
-secrets; each group degrades to a skip when absent. Only edit the tap by hand if the
-bump step reported a skip or a warning.
+`git tag vX.Y.Z && git push origin vX.Y.Z`. The tag must match the source version — the
+workflow fails otherwise.
 
-The tap release is fully automatic: the tag push triggers CI, which opens/merges the
-cask bump in `mmathys/homebrew-tap` — never clone or push that repo by hand.
+In *this* fork there are no signing secrets, so the release comes out ad-hoc signed: the
+workflow still builds and publishes both zips, but skips signing, notarization and the
+cask bump (that step is gated on notarization). After it finishes, update
+`Casks/noswoosh-pro.rb` in `KylehsuXu/homebrew-tap` by hand with the new version and the
+sha256 of `noswoosh-pro-<version>.app.zip` (the workflow prints it). Ad-hoc means every
+release needs the Accessibility checkbox ticked again — signing secrets are the fix.
+
+Upstream, the tap bump is automatic; don't copy that expectation here until the
+`HOMEBREW_TAP_TOKEN` secret exists and `can_notarize` is true.
 
 ## Traps
 
