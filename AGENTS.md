@@ -42,6 +42,14 @@ Upstream, the tap bump is automatic; don't copy that expectation here until the
 
 ## Traps
 
+**Don't re-add the "all windows on one space" rule to the preempt.** `spaceForApp` takes the
+space of the app's *frontmost* window in `CGWindowList` order. Requiring every window to share
+one space looks safer and is silently useless: WeChat keeps a 280x380 chat window on the
+neighbouring space plus the main window elsewhere, and Chrome keeps a "translate this page?"
+popup, so the preempt simply stops firing for that app — the only symptom is the animation
+coming back for that one app, which reads like a regression in a build that didn't change.
+Windows on no space (the 1512x33 title-bar helpers both apps keep) are skipped, not counted.
+
 **Don't tidy the private-API constants.** The numeric `CGEventField`s and the `1e-4`
 gesture progress are load-bearing and hard-won. `FLT_TRUE_MIN` — what the reference
 implementations use — is flushed to zero on Apple Silicon and breaks direction. Both

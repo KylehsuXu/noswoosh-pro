@@ -52,7 +52,7 @@ import ApplicationServices
 // Build: swiftc noswoosh.swift -O -o noswoosh \
 //          -F /System/Library/PrivateFrameworks -framework SkyLight
 
-let noswooshVersion = "1.8.1"
+let noswooshVersion = "1.8.2"
 
 // MARK: - Setup / teardown (system configuration, all user-level)
 
@@ -459,28 +459,29 @@ func switchSpace(right: Bool) {
 // Single display, or "Displays have separate Spaces" off: the whole list is visible here
 // and nothing is skipped.
 
-// Space holding this app's ordinary windows, or nil when it has none — or when they are
-// spread over more than one space, where switching to a guess would be worse than
-// leaving the animation in place. (An app with windows on the current space *and*
-// another one is exactly the case where macOS's own follow is a toss-up: it switches for
-// whichever window orders in, which this cannot see, so it defers.)
+// Space holding this app: the space of its *frontmost* ordinary window. CGWindowList is
+// ordered front to back, so the first layer-0 window of the pid that is on a space is the one
+// macOS itself will order in when the app activates — and therefore the space its follow rule
+// would drag us to.
 //
-// .optionAll is load-bearing, and differs from the on-screen-only list the yank guard
-// uses: without it the list carries on-screen windows only, and an app whose windows
-// all live on *other* spaces looks exactly like an app with no windows at all.
+// This replaced a rule that required all of an app's windows to be on one space and gave up
+// otherwise. Requiring that looked prudent and was wrong: any app that keeps a second window
+// elsewhere stopped preempting entirely (WeChat: a 280x380 chat window on the neighbouring
+// space plus the main window over here is enough), and the only symptom is the animation
+// quietly coming back for that app. Windows on no space at all (the 1512x33 title-bar helpers
+// WeChat and Chrome both keep) are skipped, not counted as a space.
 func spaceForApp(_ pid: pid_t) -> UInt64? {
     let list = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements],
                                           kCGNullWindowID) as? [[String: Any]] ?? []
-    let ids = list.compactMap { w -> UInt32? in
+    for w in list {
         guard (w[kCGWindowLayer as String] as? Int) == 0,
-              (w[kCGWindowOwnerPID as String] as? Int) == Int(pid) else { return nil }
-        return w[kCGWindowNumber as String] as? UInt32
+              (w[kCGWindowOwnerPID as String] as? Int) == Int(pid),
+              let window = w[kCGWindowNumber as String] as? UInt32 else { continue }
+        let spaces = SLSCopySpacesForWindows(cid, 0x7, [window] as CFArray)
+            .takeRetainedValue() as? [NSNumber] ?? []
+        if let space = spaces.first?.uint64Value { return space }
     }
-    guard !ids.isEmpty else { return nil }
-    let spaces = SLSCopySpacesForWindows(cid, 0x7, ids as CFArray)
-        .takeRetainedValue() as? [NSNumber] ?? []
-    let unique = Set(spaces.map { $0.uint64Value })
-    return unique.count == 1 ? unique.first : nil
+    return nil
 }
 
 // ProcessSerialNumber for a pid. GetProcessForPID is deprecated in C and marked
@@ -540,7 +541,7 @@ func preemptAppActivationSpace(_ app: NSRunningApplication) {
     // frames at 20ms). The list is the Dock's own model: when it disagrees with our guess,
     // it is right, and it settles in ~30-60ms anyway. Never post a move the list would clamp.
     guard let target = spaceForApp(pid) else {
-        preemptTrace(app, "no single space (windowless, multi-space, or another display)")
+        preemptTrace(app, "no window on any space (windowless app, or another display)")
         return
     }
     guard let info = spaceInfo(), let index = info.ids.firstIndex(of: target) else {
@@ -714,7 +715,10 @@ let launchAgentLabel = "xu.max.noswoosh-pro"
 
 func installLaunchAgent() {
     let executable = (Bundle.main.executablePath ?? CommandLine.arguments[0])
-    let exe = URL(fileURLWithPath: executable).standardizedFileURL.path
+    // Resolve symlinks: setup is normally reached through the cask's /opt/homebrew/bin
+    // symlink, and a LaunchAgent pointed at *that* is a plist that breaks the moment the
+    // cask is uninstalled or relinked.
+    let exe = URL(fileURLWithPath: executable).resolvingSymlinksInPath().standardizedFileURL.path
     let home = FileManager.default.homeDirectoryForCurrentUser.path
     let plistPath = "\(home)/Library/LaunchAgents/\(launchAgentLabel).plist"
     let logPath = "\(home)/Library/Logs/noswoosh-pro.log"
