@@ -2,6 +2,13 @@ import Cocoa
 import Carbon.HIToolbox
 import ApplicationServices
 
+// noswoosh-pro — instant macOS space switching, forked from mmathys/noswoosh.
+//
+// Upstream switches spaces instantly (Ctrl+arrow, 3-finger swipe). This fork adds one
+// thing: activating an app whose window lives on another space — Cmd+Tab, a Dock icon
+// click, any `open -b` hotkey — arrives instantly too, by preempting that space before
+// the app orders its window in. See the app-activation preempt section below.
+//
 // noswoosh — instant macOS space switching (verified on macOS 26 and 27, Apple Silicon).
 //
 //   noswoosh            daemon: Ctrl+Left/Right OR a 3-finger swipe switch
@@ -45,7 +52,7 @@ import ApplicationServices
 // Build: swiftc noswoosh.swift -O -o noswoosh \
 //          -F /System/Library/PrivateFrameworks -framework SkyLight
 
-let noswooshVersion = "1.7.4"
+let noswooshVersion = "1.8.0"
 
 // MARK: - Setup / teardown (system configuration, all user-level)
 
@@ -100,6 +107,10 @@ func SLSGetActiveSpace(_ cid: CGSConnectionID) -> UInt64
 @_silgen_name("SLSCopySpacesForWindows")
 func SLSCopySpacesForWindows(_ cid: CGSConnectionID, _ mask: Int32,
                              _ windows: CFArray) -> Unmanaged<CFArray>
+
+@_silgen_name("SLSSpaceSetFrontPSN")
+func SLSSpaceSetFrontPSN(_ cid: CGSConnectionID, _ sid: UInt64,
+                         _ psn: ProcessSerialNumber) -> Int32
 
 let cid = SLSMainConnectionID()
 
@@ -422,6 +433,181 @@ func switchSpace(right: Bool) {
     predictionTime = Date()
 }
 
+// MARK: - App-activation preempt (Cmd+Tab, `open -b <app>`, Dock icon click)
+
+// Activating an app whose window is on another space drags that space along with a
+// slide animation. Unlike a swipe, that switch is not an event we ever see — the Dock
+// runs its window-order follow rule internally (same rule the yank guard below keeps
+// off your back) — so the tap has nothing to intercept and no substitution to make.
+// The only way to lose the animation is to *arrive first*: on the front-switch
+// notification, switch to the app's space ourselves with the instant gesture. By the
+// time the app orders its window in, that space is already current and the follow rule
+// has nothing left to animate. Same preemption as the yank guard, pointed the other
+// way: the guard takes activation so a window never orders in, this takes the space so
+// the order-in needs no transition.
+//
+// Measured on 27.0 (26A428), single display, two spaces. Native Cmd+Tab flips the space
+// 632-671ms after the Cmd release and shows ~140ms of slide in captured frames (3 frames
+// mid-slide); with this, 371-402ms and zero mid-slide frames — 6/6 Cmd+Tab rounds and
+// 14/14 `open -b` rounds, both directions, plus a 2-space jump through a fullscreen
+// space. "Landed on the right space" alone proves nothing here: a switch that works and
+// *slides* passes it (see the 1.7.0 regression in the traps), so the frames are the test.
+//
+// Cursor-display caveat (see spaceInfo): a Dock swipe lands on the display under the
+// cursor, and it cannot be steered, so a target space that belongs to another display
+// is left alone rather than guessed at — native animation stays in that one case.
+// Single display, or "Displays have separate Spaces" off: the whole list is visible here
+// and nothing is skipped.
+
+// Space holding this app's ordinary windows, or nil when it has none — or when they are
+// spread over more than one space, where switching to a guess would be worse than
+// leaving the animation in place. (An app with windows on the current space *and*
+// another one is exactly the case where macOS's own follow is a toss-up: it switches for
+// whichever window orders in, which this cannot see, so it defers.)
+//
+// .optionAll is load-bearing, and differs from the on-screen-only list the yank guard
+// uses: without it the list carries on-screen windows only, and an app whose windows
+// all live on *other* spaces looks exactly like an app with no windows at all.
+func spaceForApp(_ pid: pid_t) -> UInt64? {
+    let list = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements],
+                                          kCGNullWindowID) as? [[String: Any]] ?? []
+    let ids = list.compactMap { w -> UInt32? in
+        guard (w[kCGWindowLayer as String] as? Int) == 0,
+              (w[kCGWindowOwnerPID as String] as? Int) == Int(pid) else { return nil }
+        return w[kCGWindowNumber as String] as? UInt32
+    }
+    guard !ids.isEmpty else { return nil }
+    let spaces = SLSCopySpacesForWindows(cid, 0x7, ids as CFArray)
+        .takeRetainedValue() as? [NSNumber] ?? []
+    let unique = Set(spaces.map { $0.uint64Value })
+    return unique.count == 1 ? unique.first : nil
+}
+
+// ProcessSerialNumber for a pid. GetProcessForPID is deprecated in C and marked
+// unavailable *to Swift* (not merely warned about), so it is resolved at runtime the way
+// setCtrlArrowShortcuts resolves SLSSetSymbolicHotKeyEnabled. ApplicationServices is
+// already linked (Carbon/AX), so this is a lookup, not a load.
+typealias GetProcessForPIDFn = @convention(c) (pid_t, UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus
+
+let getProcessForPID: GetProcessForPIDFn? = {
+    guard let services = dlopen("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices", RTLD_LAZY),
+          let symbol = dlsym(services, "GetProcessForPID") else { return nil }
+    return unsafeBitCast(symbol, to: GetProcessForPIDFn.self)
+}()
+
+func psn(for pid: pid_t) -> ProcessSerialNumber? {
+    guard let getProcessForPID else { return nil }
+    var psn = ProcessSerialNumber()
+    return getProcessForPID(pid, &psn) == noErr ? psn : nil
+}
+
+// Daemon-only: a CLI switch exits within 150ms, so preempting there would only race
+// the caller's own switch. NOSWOOSH_APP_SWITCH=0 turns it off without a rebuild.
+let appSwitchPreemptEnabled = ProcessInfo.processInfo.environment["NOSWOOSH_APP_SWITCH"] != "0"
+
+// Technique and the `SLSSpaceSetFrontPSN` call both come from yabai's
+// `skip_window_focus_animation` (asmvik, MIT), which does this from its process event
+// handler with SIP enabled. That call repoints the activation's *own* space target (see
+// `AppleSpacesSwitchOnActivate`, a separate path from the follow rule the gesture
+// preempts) at the space we just switched to. A single-display A/B on 27.0 measured no
+// difference with it removed (8 rounds each way, same landings, same zero mid-slide
+// frames), so on this geometry the gesture alone is doing the work — but the geometry it
+// plausibly guards (another display, a slower follow) is not testable from one screen,
+// and losing it would be silent. Keep unless you have multi-display evidence.
+
+// NOSWOOSH_DEBUG=1 logs one line per activation: which space the app is on, what the space
+// list said, what was posted, and why nothing was when nothing was. An intermittent miss is
+// otherwise invisible — the Dock's follow covers for it with the animation, and no error is
+// reported anywhere — so it has to be readable afterwards instead of guessed at. Every line
+// carries a timestamp: a bare sequence of decisions cannot tell a burst from an afternoon.
+let debugPreempt = ProcessInfo.processInfo.environment["NOSWOOSH_DEBUG"] != nil
+
+func preemptTrace(_ app: NSRunningApplication, _ note: @autoclosure () -> String) {
+    guard debugPreempt else { return }
+    let formatter = DateFormatter()
+    formatter.dateFormat = "HH:mm:ss.SSS"
+    log("\(formatter.string(from: Date())) preempt \(app.localizedName ?? "pid \(app.processIdentifier)"): \(note())")
+}
+
+func preemptAppActivationSpace(_ app: NSRunningApplication) {
+    let pid = app.processIdentifier
+    // Deliberately the list's own answer, with no "where we think we are heading" state on
+    // top of it. An earlier version preferred an in-flight target for a few hundred ms after
+    // posting, and that is strictly worse here: when the guess was wrong (a gesture the Dock
+    // dropped, or a switch that had already landed) it computed a step that the list would
+    // have clamped, so it posted a swipe off the end of the space list — a rubber-band at
+    // best, and measured on 27.0 a *black screen* for ~400ms (mean luma 197 -> 5.5, five
+    // frames at 20ms). The list is the Dock's own model: when it disagrees with our guess,
+    // it is right, and it settles in ~30-60ms anyway. Never post a move the list would clamp.
+    guard let target = spaceForApp(pid) else {
+        preemptTrace(app, "no single space (windowless, multi-space, or another display)")
+        return
+    }
+    guard let info = spaceInfo(), let index = info.ids.firstIndex(of: target) else {
+        preemptTrace(app, "space \(target) not in this display's list")
+        return
+    }
+    // Landing on the space you are already on is the common case (an app activated on its
+    // own space) and is also what makes this safe to leave on: nothing to do, nothing
+    // posted. A windowless app — noswoosh itself, when the yank guard activates us — fails
+    // at spaceForApp and lands here too.
+    guard index != info.currentIndex else {
+        preemptTrace(app, "nothing to do: already on \(target) (list index \(info.currentIndex) of \(info.ids.count))")
+        return
+    }
+    guard let psn = psn(for: pid) else {
+        preemptTrace(app, "no PSN for pid \(pid)")
+        return
+    }
+    let steps = index - info.currentIndex
+    _ = SLSSpaceSetFrontPSN(cid, target, psn)
+    preemptTrace(app, "\(info.ids[info.currentIndex]) -> \(target): \(abs(steps)) step(s) \(steps > 0 ? "right" : "left"), list index \(info.currentIndex) of \(info.ids.count)")
+    // One gesture per space of travel: a Dock swipe moves exactly one space. Posted as
+    // a burst, and like the Ctrl+arrow path they are tagged/counted so our own tap
+    // passes them through instead of re-interpreting them as a swipe to replace.
+    for _ in 0..<abs(steps) { postSwitchGesture(right: steps > 0) }
+    retryPreemptIfStuck(from: info.ids[info.currentIndex], to: target, right: steps > 0,
+                        pid: pid, attempt: 0)
+    // The same bookkeeping the swipe core does, so a Ctrl+arrow arriving inside the next
+    // prediction window is not judged against the pre-switch list.
+    predictedIndex = index
+    predictedDisplay = info.display
+    predictionTime = Date()
+}
+
+// Posting a gesture is not the same as the space moving. Under rapid app switching the Dock
+// sometimes ignores the swipe entirely (measured: 69ms from press to post, and the space
+// still only flipped 315ms *after* the post — the follow rule, with the animation this all
+// exists to remove). The follow commits at ~320-370ms, so there is room for exactly one
+// retry: it either lands instantly and beats the follow by ~170ms, or it is dropped like the
+// first and nothing changes. Two guards keep the retry from becoming its own bug — the list
+// must still show the space we left (if it moved at all, the switch worked and a second
+// gesture would overshoot), and the same app must still be in front (otherwise the user has
+// moved on and the retry would drag them back).
+let preemptRetryDelay = 0.15
+
+func retryPreemptIfStuck(from: UInt64, to: UInt64, right: Bool, pid: pid_t, attempt: Int) {
+    guard attempt < 2 else { return }
+    DispatchQueue.main.asyncAfter(deadline: .now() + preemptRetryDelay) {
+        guard let info = spaceInfo(), info.ids[info.currentIndex] == from,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+        log("preempt retry: still on space \(from) \(Int(preemptRetryDelay * 1000))ms after posting, re-posting for \(to)")
+        postSwitchGesture(right: right)
+        retryPreemptIfStuck(from: from, to: to, right: right, pid: pid, attempt: attempt + 1)
+    }
+}
+
+func installAppActivationPreempt() {
+    NSWorkspace.shared.notificationCenter.addObserver(
+        forName: NSWorkspace.didActivateApplicationNotification,
+        object: nil, queue: .main
+    ) { note in
+        guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey]
+                as? NSRunningApplication else { return }
+        preemptAppActivationSpace(app)
+    }
+}
+
 // MARK: - Empty-desktop yank guard
 
 // Landing on a space with no ordinary windows makes macOS pick some other app
@@ -546,21 +732,21 @@ if args.count > 1 {
             _ = runTool("/usr/bin/killall", ["Dock"])
         }
         print("""
-        noswoosh setup complete:
+        noswoosh-pro setup complete:
           - system animated Ctrl+arrow shortcuts disabled (live + persisted)
-        Remaining: start the daemon (brew services start noswoosh, or the
-        LaunchAgent from install.sh) and grant it Accessibility permission.
+        Remaining: start the daemon (the cask installs and starts it; from source use the
+        LaunchAgent that install.sh writes) and grant it Accessibility permission.
         """)
         exit(0)
     case "teardown":
         setCtrlArrowShortcuts(enabled: true)
-        print("noswoosh teardown complete: system Ctrl+arrow shortcuts re-enabled.")
+        print("noswoosh-pro teardown complete: system Ctrl+arrow shortcuts re-enabled.")
         exit(0)
     case "version", "--version":
-        print("noswoosh \(noswooshVersion)")
+        print("noswoosh-pro \(noswooshVersion)")
         exit(0)
     default:
-        FileHandle.standardError.write("usage: noswoosh [left | right | list | setup | teardown | version]\n".data(using: .utf8)!)
+        FileHandle.standardError.write("usage: noswoosh-pro [left | right | list | setup | teardown | version]\n".data(using: .utf8)!)
         exit(1)
     }
 }
@@ -568,7 +754,7 @@ if args.count > 1 {
 // MARK: - Daemon mode
 
 func log(_ message: String) {
-    FileHandle.standardError.write("noswoosh: \(message)\n".data(using: .utf8)!)
+    FileHandle.standardError.write("noswoosh-pro: \(message)\n".data(using: .utf8)!)
 }
 
 // Accessibility trust is evaluated when the process starts and cached for its
@@ -616,6 +802,11 @@ if yankGuardNeeded {
     log("empty-desktop yank guard off (forced by NOSWOOSH_FORCE_YANK_GUARD)")
 } else {
     log("empty-desktop yank guard off (macOS \(macOSMajor) handles it natively)")
+}
+if appSwitchPreemptEnabled {
+    installAppActivationPreempt()
+} else {
+    log("app-activation preempt off (NOSWOOSH_APP_SWITCH=0)")
 }
 
 // Input source 1: Ctrl+Left / Ctrl+Right hotkey.
