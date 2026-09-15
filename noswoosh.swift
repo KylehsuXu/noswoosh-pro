@@ -52,7 +52,7 @@ import ApplicationServices
 // Build: swiftc noswoosh.swift -O -o noswoosh \
 //          -F /System/Library/PrivateFrameworks -framework SkyLight
 
-let noswooshVersion = "1.8.4"
+let noswooshVersion = "1.8.5"
 
 // MARK: - Setup / teardown (system configuration, all user-level)
 
@@ -388,6 +388,8 @@ func listIsSettled(_ info: SpaceInfo) -> Bool {
     guard info.currentIndex >= 0, info.currentIndex < info.ids.count else { return true }
     return SLSGetActiveSpace(cid) == info.ids[info.currentIndex]
 }
+
+var postingAllowed = true
 
 // MARK: - Switch core (both input sources call only this)
 
@@ -890,8 +892,6 @@ if !AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary) {
 // from a shell instead, the grant is inherited from the terminal and preflight reports "no"
 // for posts that in fact work (verified: the CLI's posts land while preflight is false), so
 // there the flag is left alone rather than gating a working setup into silence.
-var postingAllowed = true
-
 
 // Posting synthetic events is a *separate* grant from Accessibility on current macOS — the
 // "Device Control and Data Access" pane (kTCCServicePostEvent). Without it every posted event
