@@ -52,7 +52,7 @@ import ApplicationServices
 // Build: swiftc noswoosh.swift -O -o noswoosh \
 //          -F /System/Library/PrivateFrameworks -framework SkyLight
 
-let noswooshVersion = "1.8.5"
+let noswooshVersion = "1.8.6"
 
 // MARK: - Setup / teardown (system configuration, all user-level)
 
@@ -374,32 +374,142 @@ func postPair(_ dock: CGEvent) {
     companion.post(tap: .cgSessionEventTap)
 }
 
-// Two reads of the same truth: the per-display list (what a switch is computed against) and
-// SLSGetActiveSpace (the keyboard-focus one). When they disagree the list is mid-update, and a
-// gesture posted now would be computed from an index that no longer matches where the Dock
-// thinks it is — at the ends of the list that means a swipe the Dock has to clamp, which on
-// macOS 27 blanks the screen for a few hundred ms and can leave the gesture engine refusing
-// swipes altogether until a logout. Skipping one switch costs the animation for that one
-// press; posting into that window costs the whole session. Only checked with a single space
-// list: with "Displays have separate Spaces" the two APIs answer for different displays.
-func listIsSettled(_ info: SpaceInfo) -> Bool {
-    let displays = SLSCopyManagedDisplaySpaces(cid).takeRetainedValue() as! [[String: Any]]
-    guard displays.count <= 1 else { return true }
-    guard info.currentIndex >= 0, info.currentIndex < info.ids.count else { return true }
-    return SLSGetActiveSpace(cid) == info.ids[info.currentIndex]
-}
-
 var postingAllowed = true
 
 // MARK: - Switch core (both input sources call only this)
 
-// The gesture commits asynchronously, so on rapid presses the space list can be
-// stale. Trust our own prediction for a short window after a switch. macOS 27's
-// list settles slower after a synthetic switch, so give it a wider window.
-var predictedIndex: Int?
-var predictedDisplay: String?
-var predictionTime = Date.distantPast
-let predictionWindow = needsAugmentation ? 0.4 : 0.25
+// One switch in flight at a time. A post is not committed when it is handed to the Dock:
+// measured on 27.0 from this process, the Dock's own model — the per-display "Current Space"
+// and SLSGetActiveSpace, which flip together — reads the new space 38ms after the post, so
+// until then the list still reads the space we posted *from*. A second post inside that window
+// is computed from an index the Dock has already left, and when that index is at the end of the
+// list the swipe is one the Dock has to clamp. A clamped swipe is expensive: measured here at
+// mean luma 201 -> 7.6 for ~500ms (a black screen), with the space list frozen while the clamps
+// keep coming, every gesture already posted silently ignored, and the reads staying stale — so
+// the preempt decides "already there", stands down, and macOS's own follow rule animates the
+// switch. On a two-space desktop that window is *every* rapid press, because every step is a
+// step to the end of the list; that is why single presses were instant and bursts went black
+// and then animated.
+//
+// So a post happens only once the Dock's model has caught up with the previous one, and a
+// request arriving before that is parked and re-evaluated from a fresh read. Nothing is ever
+// posted from an index we cannot verify — neither a stale read (this gate) nor a guessed one:
+// the per-display prediction that used to cover rapid presses here was removed for the same
+// reason, since a stale guess posts the same unpostable direction.
+
+// Space the in-flight post started from, or nil when nothing is in flight.
+var postedFrom: UInt64?
+var postedAt = Date.distantPast
+// A healthy commit takes ~38ms. Past this the swipe was dropped rather than merely slow; the
+// follow rule needs ~320ms to pull the same switch off natively, so giving up here still leaves
+// room to re-post from a read we can trust again.
+let postCommitTimeout = 0.3
+
+// Parked requests. A relative one (Ctrl+arrow, a real swipe) accumulates as net steps — holding
+// the key is a press every ~33ms on the default repeat rate and each press is one space, so
+// coalescing them into "one step" would quietly cut a held key short. An app activation parks as
+// its pid instead: the latest activation is what the user asked for, and re-running the whole
+// preempt from a fresh read turns "that space already landed" into a no-op rather than a step.
+var pendingSteps = 0
+var pendingReach: pid_t?
+var pendingTimer: Timer?
+
+func listShows(_ space: UInt64) -> Bool {
+    guard let info = spaceInfo(), info.currentIndex >= 0,
+          info.currentIndex < info.ids.count else { return false }
+    return info.ids[info.currentIndex] == space
+}
+
+// False while the Dock has not committed the last post yet: the caller must not compute a
+// direction from the list until this is true. Clears the record once it has, and on the timeout
+// above, so a dropped swipe cannot wedge the daemon into never posting again. An unreadable
+// list counts as caught up — posting blind is what upstream always did there, and blocking
+// forever would silently disable every switch.
+func dockCaughtUp() -> Bool {
+    guard let from = postedFrom else { return true }
+    if listShows(from) {
+        guard Date().timeIntervalSince(postedAt) > postCommitTimeout else { return false }
+        log("switch posted \(Int(postCommitTimeout * 1000))ms ago never committed (swipe dropped)")
+    }
+    postedFrom = nil
+    return true
+}
+
+func notePost(from space: UInt64) {
+    postedFrom = space
+    postedAt = Date()
+}
+
+// Debug line for the switch core itself (the preempt has `preemptTrace`). An intermittent miss on
+// the Ctrl+arrow/swipe side is invisible otherwise: the space just moves natively, animated, with
+// nothing recorded anywhere. NOSWOOSH_DEBUG=1.
+func switchTrace(_ note: @autoclosure () -> String) {
+    guard debugEnabled else { return }
+    let formatter = DateFormatter()
+    formatter.dateFormat = "HH:mm:ss.SSS"
+    log("\(formatter.string(from: Date())) switch: \(note())")
+}
+
+func parkStep(right: Bool) {
+    pendingSteps += right ? 1 : -1
+    switchTrace("parked a \(right ? "right" : "left") press (net \(pendingSteps)) — a switch of ours is still uncommitted")
+    startPendingTimer()
+}
+
+func parkReach(pid: pid_t) {
+    pendingReach = pid
+    startPendingTimer()
+}
+
+// Apply a parked request as soon as the Dock catches up: a 20ms tick, against the ~320ms the
+// follow rule would take to animate the same switch. One request per tick, deliberately: an app
+// activation posts a gesture, which closes the gate again, so applying the parked steps straight
+// after it would be posting into *its* commit window — the clamp this whole section exists to
+// avoid, and measured as a black screen when both were parked together under a burst of swipes.
+func startPendingTimer() {
+    guard pendingTimer == nil else { return }
+    pendingTimer = Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { timer in
+        guard dockCaughtUp() else { return }
+        if let pid = pendingReach {
+            pendingReach = nil
+            // The activation that parked this may have been superseded while we waited. Applying
+            // it then would drag the user to the space of an app they are no longer looking at,
+            // and the newer activation — already satisfied where they are — would fight it (its
+            // window orders in on its own space, so the follow rule pulls them straight back,
+            // animated). Same guard the old retry used for the same reason.
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+               let app = NSRunningApplication(processIdentifier: pid) {
+                preemptAppActivationSpace(app)
+            }
+            if pendingSteps == 0 { timer.invalidate(); pendingTimer = nil }
+            return
+        }
+        let steps = pendingSteps
+        pendingSteps = 0
+        timer.invalidate(); pendingTimer = nil
+        applySteps(steps)
+    }
+}
+
+// One gesture per space of travel: a Dock swipe moves exactly one. Clamped to the list so a
+// burst of parked presses can never ask the Dock to step off either end (the clamp this whole
+// section exists to avoid), and skipped entirely at an edge, as a single press there always was.
+func applySteps(_ steps: Int) {
+    guard steps != 0 else { return }
+    guard let info = spaceInfo(), info.currentIndex >= 0,
+          info.currentIndex < info.ids.count else {
+        // No list to compute a direction against (private API changed?): post one step blind,
+        // which is what upstream always did there, rather than silently stopping.
+        switchTrace("one step \(steps > 0 ? "right" : "left") blind (no readable space list)")
+        postSwitchGesture(right: steps > 0)
+        return
+    }
+    let clamped = max(-info.currentIndex, min(steps, info.ids.count - 1 - info.currentIndex))
+    guard clamped != 0 else { return }
+    switchTrace("\(abs(clamped)) step(s) \(clamped > 0 ? "right" : "left") from \(info.ids[info.currentIndex]) at list index \(info.currentIndex) of \(info.ids.count)\(clamped != steps ? " (parked \(steps) clamped to the list)" : "")")
+    for _ in 0..<abs(clamped) { postSwitchGesture(right: clamped > 0) }
+    notePost(from: info.ids[info.currentIndex])
+}
 
 func postSwitchGesture(right: Bool) {
     // Gate on the daemon's own posting grant: see postingAllowed.
@@ -430,26 +540,13 @@ func postSwitchGesture(right: Bool) {
 }
 
 func switchSpace(right: Bool) {
-    guard let info = spaceInfo() else {
-        postSwitchGesture(right: right)
+    // Park the press instead of computing a direction from a list that is still reporting the
+    // space we are leaving — a stale read here is a swipe the Dock refuses.
+    guard dockCaughtUp() else {
+        parkStep(right: right)
         return
     }
-    var current = info.currentIndex
-    // Prefer our prediction while the list may still be catching up, so a rapid
-    // second switch is not blocked by a stale "you're at the edge" reading.
-    // Only on the display it was made for; the cursor may have moved since.
-    if let p = predictedIndex, predictedDisplay == info.display,
-       Date().timeIntervalSince(predictionTime) < predictionWindow {
-        current = p
-    }
-    let target = current + (right ? 1 : -1)
-    // Clamp at first/last space to avoid the rubber-band bounce animation
-    // (on macOS 27 this also spares the Dock a swipe it would only reject).
-    guard target >= 0, target < info.ids.count else { return }
-    postSwitchGesture(right: right)
-    predictedIndex = target
-    predictedDisplay = info.display
-    predictionTime = Date()
+    applySteps(right ? 1 : -1)
 }
 
 // MARK: - App-activation preempt (Cmd+Tab, `open -b <app>`, Dock icon click)
@@ -536,14 +633,15 @@ let appSwitchPreemptEnabled = ProcessInfo.processInfo.environment["NOSWOOSH_APP_
 // and losing it would be silent. Keep unless you have multi-display evidence.
 
 // NOSWOOSH_DEBUG=1 logs one line per activation: which space the app is on, what the space
-// list said, what was posted, and why nothing was when nothing was. An intermittent miss is
-// otherwise invisible — the Dock's follow covers for it with the animation, and no error is
-// reported anywhere — so it has to be readable afterwards instead of guessed at. Every line
-// carries a timestamp: a bare sequence of decisions cannot tell a burst from an afternoon.
-let debugPreempt = ProcessInfo.processInfo.environment["NOSWOOSH_DEBUG"] != nil
+// list said, what was posted, and why nothing was when nothing was — plus one line per switch the
+// core posts. An intermittent miss is otherwise invisible — the Dock's follow covers for it with
+// the animation, and no error is reported anywhere — so it has to be readable afterwards instead
+// of guessed at. Every line carries a timestamp: a bare sequence of decisions cannot tell a burst
+// from an afternoon.
+let debugEnabled = ProcessInfo.processInfo.environment["NOSWOOSH_DEBUG"] != nil
 
 func preemptTrace(_ app: NSRunningApplication, _ note: @autoclosure () -> String) {
-    guard debugPreempt else { return }
+    guard debugEnabled else { return }
     let formatter = DateFormatter()
     formatter.dateFormat = "HH:mm:ss.SSS"
     log("\(formatter.string(from: Date())) preempt \(app.localizedName ?? "pid \(app.processIdentifier)"): \(note())")
@@ -551,16 +649,29 @@ func preemptTrace(_ app: NSRunningApplication, _ note: @autoclosure () -> String
 
 func preemptAppActivationSpace(_ app: NSRunningApplication) {
     let pid = app.processIdentifier
+    // A newer activation supersedes anything parked for an older one, whatever this call then
+    // decides: "nothing to do" is a decision about the app in front *now*.
+    pendingReach = nil
     // Deliberately the list's own answer, with no "where we think we are heading" state on
     // top of it. An earlier version preferred an in-flight target for a few hundred ms after
     // posting, and that is strictly worse here: when the guess was wrong (a gesture the Dock
     // dropped, or a switch that had already landed) it computed a step that the list would
     // have clamped, so it posted a swipe off the end of the space list — a rubber-band at
     // best, and measured on 27.0 a *black screen* for ~400ms (mean luma 197 -> 5.5, five
-    // frames at 20ms). The list is the Dock's own model: when it disagrees with our guess,
-    // it is right, and it settles in ~30-60ms anyway. Never post a move the list would clamp.
+    // frames at 20ms). The list is the Dock's own model, and it is right whenever it has
+    // finished moving; `dockCaughtUp` above is what establishes that, and until it does this
+    // preempt parks the request instead of guessing (which is the same clamp by another route).
     guard let target = spaceForApp(pid) else {
         preemptTrace(app, "no window on any space (windowless app, or another display)")
+        return
+    }
+    // Before reading the list for a decision: it reports the space we are leaving until the
+    // Dock commits, so inside that window "already there" is a wrong answer for the app that
+    // needs the switch (macOS then animates it) and the computed direction is one the Dock has
+    // already left (which is the clamp). Park it; the tick re-runs this whole decision.
+    guard dockCaughtUp() else {
+        preemptTrace(app, "a switch of ours is still uncommitted — deferring to \(target)")
+        parkReach(pid: pid)
         return
     }
     guard let info = spaceInfo(), let index = info.ids.firstIndex(of: target) else {
@@ -579,46 +690,16 @@ func preemptAppActivationSpace(_ app: NSRunningApplication) {
         preemptTrace(app, "no PSN for pid \(pid)")
         return
     }
-    guard listIsSettled(info) else {
-        preemptTrace(app, "space list is mid-update (list \(info.ids[info.currentIndex]) vs active \(SLSGetActiveSpace(cid))) — leaving this one to macOS")
-        return
-    }
     let steps = index - info.currentIndex
     _ = SLSSpaceSetFrontPSN(cid, target, psn)
     preemptTrace(app, "\(info.ids[info.currentIndex]) -> \(target): \(abs(steps)) step(s) \(steps > 0 ? "right" : "left"), list index \(info.currentIndex) of \(info.ids.count)")
     // One gesture per space of travel: a Dock swipe moves exactly one space. Posted as
     // a burst, and like the Ctrl+arrow path they are tagged/counted so our own tap
-    // passes them through instead of re-interpreting them as a swipe to replace.
+    // passes them through instead of re-interpreting them as a swipe to replace. The whole
+    // burst is one request against the gate above: it starts from an index the Dock confirms,
+    // and each gesture lands one space on from the last, so the last one lands on the target.
     for _ in 0..<abs(steps) { postSwitchGesture(right: steps > 0) }
-    retryPreemptIfStuck(from: info.ids[info.currentIndex], to: target, right: steps > 0,
-                        pid: pid, attempt: 0)
-    // The same bookkeeping the swipe core does, so a Ctrl+arrow arriving inside the next
-    // prediction window is not judged against the pre-switch list.
-    predictedIndex = index
-    predictedDisplay = info.display
-    predictionTime = Date()
-}
-
-// Posting a gesture is not the same as the space moving. Under rapid app switching the Dock
-// sometimes ignores the swipe entirely (measured: 69ms from press to post, and the space
-// still only flipped 315ms *after* the post — the follow rule, with the animation this all
-// exists to remove). The follow commits at ~320-370ms, so there is room for exactly one
-// retry: it either lands instantly and beats the follow by ~170ms, or it is dropped like the
-// first and nothing changes. Two guards keep the retry from becoming its own bug — the list
-// must still show the space we left (if it moved at all, the switch worked and a second
-// gesture would overshoot), and the same app must still be in front (otherwise the user has
-// moved on and the retry would drag them back).
-let preemptRetryDelay = 0.15
-
-func retryPreemptIfStuck(from: UInt64, to: UInt64, right: Bool, pid: pid_t, attempt: Int) {
-    guard attempt < 2 else { return }
-    DispatchQueue.main.asyncAfter(deadline: .now() + preemptRetryDelay) {
-        guard let info = spaceInfo(), info.ids[info.currentIndex] == from,
-              NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
-        log("preempt retry: still on space \(from) \(Int(preemptRetryDelay * 1000))ms after posting, re-posting for \(to)")
-        postSwitchGesture(right: right)
-        retryPreemptIfStuck(from: from, to: to, right: right, pid: pid, attempt: attempt + 1)
-    }
+    notePost(from: info.ids[info.currentIndex])
 }
 
 func installAppActivationPreempt() {

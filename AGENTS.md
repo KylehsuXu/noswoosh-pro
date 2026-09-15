@@ -131,6 +131,56 @@ explicitly with `CGWarpMouseCursorPosition` — otherwise results depend on wher
 happened to leave it. Only relevant with "Displays have separate Spaces" on; with it off
 every screen shares one space list.
 
+**The ~38ms commit window is the whole clamp story — keep one switch in flight.** A posted
+swipe is not committed when it is handed to the Dock: measured on 27.0 from this process, the
+Dock's own space model (the per-display `Current Space` *and* `SLSGetActiveSpace` — they flip
+together) reads the new space **38ms after the post**, so until then the list still reads the
+space we came *from*. A second post inside that window computes its direction from an index the
+Dock has already left, and when that index sits at an end of the list the swipe is one the Dock
+has to clamp. A clamp is expensive and silent: measured mean luma 201 → 7.6 for ~500ms (a black
+screen), the space list frozen while the clamps keep coming, every gesture already posted ignored,
+and the now-silent reads making the preempt decide "already there" — so macOS's own follow rule
+animates the switch instead. That is the whole reported symptom pair (black screen **and** the
+animation coming back) in one mechanism. On a two-space desktop the window is *every* rapid press,
+because every step is a step to an end: 4 of 6 bursts of app activations 20ms apart went black on
+1.8.5 (5-10 dark frames each, three of them with the space moving again ~1.5-2.2s later), 0 of 10
+on the fix. So the switch core posts one switch at a time: `dockCaughtUp()` refuses while the list
+still reads the space the last post started from, and a request arriving before that is parked
+(`parkStep` / `parkReach`) and re-evaluated from a fresh read on a 20ms tick. Don't "simplify"
+this back into a straight post — the failure is intermittent, looks like a Dock bug, and leaves no
+trace anywhere unless `NOSWOOSH_DEBUG=1` is set.
+
+**The dead guard was the tell: don't re-add a `SLSGetActiveSpace` comparison.** This repo used to
+skip a preempt when the per-display list and `SLSGetActiveSpace` disagreed ("the list is
+mid-update"). With a single managed display those are the same value: `spaceInfo()` derives
+`currentIndex` *from* `SLSGetActiveSpace`, so the guard compared it to itself and could never fire —
+and it would not have helped anyway, because both APIs flip together at commit (0 disagreements in
+1ms-resolution sampling across ~40 switches). The trustworthy signal is our own posting record
+(`postedFrom` + the list), never two views of the same lagging model.
+
+**The retry was the fuse, not the rescue.** `retryPreemptIfStuck` re-posted the same direction
+150ms after a post whose target the list had not confirmed. All five firings in a wild log happened
+inside rapid-switching bursts — i.e. during a wedge, where its "still on the old space" test passes
+forever, so it just kept feeding same-direction swipes into a wedged Dock. Deleted. A dropped post
+now costs one animated switch (the follow rule covers it) instead of a black screen.
+
+**One parked request per tick, and don't merge them back.** The pending tick applies a parked app
+activation *or* parked steps, never both: an activation posts a gesture, which closes the gate
+again, so applying the parked steps straight after it is posting into *its* commit window.
+Measured as 9 dark frames in one burst — found while writing this fix, in the fix.
+
+**A parked app switch must not outlive a newer activation.** Before applying `pendingReach`, check
+that pid is still frontmost, and clear `pendingReach` on every new activation. Otherwise the daemon
+moves to the space of an app the user has already left, and the newer app's window ordering drags
+them back, animated.
+
+**The CLI is not gated against a running daemon.** `noswoosh-pro left/right` runs in its own
+process, so its in-flight record is its own; a CLI switch posted inside a daemon switch's commit
+window (or the reverse) is still the clamp above. At human cadence it is unreachable (a process
+spawn is ~100-460ms against a 38ms window), but a hotkey tool that *repeats* a CLI binding can hit
+it. Closing it means routing the CLI's request through the daemon — a second event tag the tap
+converts into a gated `switchSpace` — which nobody has needed yet.
+
 **Nothing secret belongs in this repo.** Signing material lives in
 `~/.config/noswoosh-signing/` and in CI secrets. The `.p12` must be exported with
 legacy PBE flags (`-keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1`) or
@@ -156,6 +206,34 @@ Test both OS paths. The catch: whichever machine you're on only runs one path na
 Use `NOSWOOSH_FORCE_AUGMENT=1` / `=0` to force the 27 / pre-27 path regardless of OS for
 a smoke test, but the payload is only *validated* by the real OS — a forced path can
 post without switching. So confirm the 27 path on an actual macOS 27.
+
+**The app-activation race is drivable from a script; the swipe path is not.** A tight loop of
+`NSRunningApplication.activate()` produces the same `didActivateApplicationNotification` the
+preempt handles, so Cmd+Tab / skhd bursts can be reproduced without a keyboard — that is what
+`scripts/race-check.swift` does, and it is the regression check for this whole class of bug:
+
+```sh
+swift scripts/race-check.swift com.tencent.xinWeChat com.google.Chrome 20 24
+```
+
+It drives two apps that live on different spaces, grabs frames (needs Screen Recording permission
+for the terminal — without it the run says so and the frames prove nothing), and fails on any frame
+below luma 60: a clamped swipe blanks the display for ~500ms, measured at min luma 5.5 against ~200
+for a normal desktop. On 1.8.5 it fails 2 of 2 runs at this cadence (7-10 black frames); with the
+gate it passes 2 of 2 (min luma ~199). The list stats it prints are diagnostics, not a verdict: a
+gated build *deliberately* parks and coalesces rapid activations, so it makes fewer space changes
+than there were activations and is still working perfectly. **Cadence decides it** — a uniform 90ms
+burst usually survives even the buggy build, because the damage needs two posts inside the 38ms
+commit window; 20ms reproduces it in about two thirds of runs, and the user-visible streams that hit
+it are key-repeat/jittered, with sub-38ms clusters. Read the daemon log afterwards with
+`NOSWOOSH_DEBUG=1`: one `preempt` line per activation, one `switch:` line per posted switch, which
+is what makes an intermittent miss readable instead of guessable. Assert by space `id64`, not index
+(the auto-rearrange trap above).
+
+The swipe path still cannot be driven synthetically: the daemon's tap *does* swallow an untagged
+synthetic swipe, but the shapes differ from a real trackpad gesture in ways that mislead — a lone
+terminal-phase event with its dock fields cleared still serializes its original IOHID blob, which
+makes it look like the passthrough commits a step, and it does not. Verify swipe on a trackpad.
 
 ### Testing on a macOS 27 VM
 
