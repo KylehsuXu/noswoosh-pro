@@ -16,6 +16,10 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Tag pushes do not trigger workflows in this fork (verified: 0 runs after two tag
+  # pushes), so the release can also be dispatched by hand from main. The version comes
+  # from noswoosh.swift and is used as the tag.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -29,13 +33,18 @@ jobs:
       - name: Resolve version
         id: version
         run: |
-          tag="${GITHUB_REF_NAME#v}"
           src=$(sed -n 's/^let noswooshVersion = "\(.*\)"$/\1/p' noswoosh.swift)
-          if [ "$tag" != "$src" ]; then
-            echo "tag $GITHUB_REF_NAME does not match noswooshVersion ($src)" >&2
-            exit 1
+          # On a tag push the version must match the ref; on a manual dispatch the ref is a
+          # branch, so the source version decides and becomes the tag.
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "$tag" != "$src" ]; then
+              echo "tag $GITHUB_REF_NAME does not match noswooshVersion ($src)" >&2
+              exit 1
+            fi
           fi
           echo "version=$src" >> "$GITHUB_OUTPUT"
+          echo "tag=v$src" >> "$GITHUB_OUTPUT"
 
       - name: Check signing secrets
         id: signing
@@ -114,10 +123,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes \
+          gh release create "$TAG" --title "$TAG" --generate-notes \
             || echo "release already exists, uploading assets"
-          gh release upload "$GITHUB_REF_NAME" \
+          gh release upload "$TAG" \
             "noswoosh-pro-$VERSION-macos.zip" "noswoosh-pro-$VERSION.app.zip" --clobber
 
       - name: Bump cask in homebrew-tap
