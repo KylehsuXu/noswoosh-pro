@@ -52,7 +52,7 @@ import ApplicationServices
 // Build: swiftc noswoosh.swift -O -o noswoosh \
 //          -F /System/Library/PrivateFrameworks -framework SkyLight
 
-let noswooshVersion = "1.8.2"
+let noswooshVersion = "1.8.3"
 
 // MARK: - Setup / teardown (system configuration, all user-level)
 
@@ -853,6 +853,32 @@ if !AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary) {
             let pane = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
             if let url = URL(string: pane), NSWorkspace.shared.open(url) {
                 log("opened System Settings > Privacy & Security > Accessibility")
+            }
+        }
+    }
+}
+
+// Posting synthetic events is a *separate* grant from Accessibility on current macOS — the
+// "Device Control and Data Access" pane (kTCCServicePostEvent). Without it every posted event
+// is dropped *and* each attempt re-raises the system prompt, so the app reads as one begging
+// for permission in a loop while the space switches that reach the Dock are just the native
+// ones. Ask once, then wait like the Accessibility gate above rather than posting into a wall.
+if !CGPreflightPostEventAccess() {
+    log("waiting for \"Device Control and Data Access\" permission (System Settings > Privacy & Security > 设备控制和数据访问)")
+    _ = CGRequestPostEventAccess()
+    var secondsWaited = 0
+    var openedSettings = false
+    Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+        if CGPreflightPostEventAccess() {
+            log("event-posting permission granted — restarting to apply it")
+            exit(0)
+        }
+        secondsWaited += 1
+        if secondsWaited == 15, !openedSettings {
+            openedSettings = true
+            let pane = "x-apple.systempreferences:com.apple.preference.security"
+            if let url = URL(string: pane), NSWorkspace.shared.open(url) {
+                log("opened System Settings > Privacy & Security")
             }
         }
     }
