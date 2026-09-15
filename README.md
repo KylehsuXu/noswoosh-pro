@@ -1,40 +1,34 @@
 # noswoosh-pro
 
-> **Fork.** `noswoosh-pro` is [KylehsuXu](https://github.com/KylehsuXu)'s fork of
-> [mmathys/noswoosh](https://github.com/mmathys/noswoosh), and it is upstream's work that makes
-> it work at all — the gesture technique, the swipe interception, the macOS 27 IOHID payload,
-> the empty-desktop yank guard and this README all come from there. **Thanks to
-> [Maximilian Mathys (@mmathys)](https://github.com/mmathys)** for building and maintaining it.
+> **本仓库是 [mmathys/noswoosh](https://github.com/mmathys/noswoosh) 的 fork。** 上游由
+> [Maximilian Mathys（@mmathys）](https://github.com/mmathys) 开发维护 —— 合成 Dock 滑动手势的
+> 技巧、拦截真实三指滑动的事件 tap、macOS 27 的 IOHID 载荷、空桌面 yank 守卫、安装脚本与文档
+> 全部出自上游，**在此表示衷心感谢**。本 fork 只在其基础上加了一件事：**切换到位于其他空间的应用**
+> （Cmd+Tab、[skhd](https://github.com/koekeishiya/skhd) / `open -b` 快捷键、点 Dock 图标）同样瞬时完成
+> —— 在该应用的窗口 order in 之前先把空间切过去。其余部分与上游保持一致，用 `git merge upstream/main` 同步。
 >
-> Upstream already makes **Ctrl+←/→ and 3-finger swipes** instant. This fork adds one thing on
-> top of that: switching to an app whose window lives on another space — **Cmd+Tab**, a
-> **[skhd](https://github.com/koekeishiya/skhd) / `open -b` hotkey**, a Dock icon click — also
-> arrives instantly, by moving to that space before the app orders its window in. Everything
-> else is upstream's work, kept in sync with `git merge upstream/main`.
->
-> 🇨🇳 [中文说明 / Chinese README](README.zh-CN.md)
+> 🇬🇧 [English README](README.en.md)
 >
 > ```sh
 > brew install --cask KylehsuXu/tap/noswoosh-pro
 > ```
 
-Instant, animation-free switching between macOS Spaces (**3-finger swipe** or
-**Ctrl+←/→**). Works on **macOS 26.6+ and 27**, no SIP disabling, no global Reduce
-Motion.
+空间切换**无动画、瞬时完成**：**三指滑动**、**Ctrl+←/→**，以及**切换到位于其他空间的应用**。
+支持 **macOS 26.6+ 与 27**，不需要关闭 SIP，也不需要打开全局"减弱动态效果"。
 
 [![Latest release](https://img.shields.io/github/v/release/KylehsuXu/noswoosh-pro?color=blue)](https://github.com/KylehsuXu/noswoosh-pro/releases/latest)
 [![MIT license](https://img.shields.io/github/license/KylehsuXu/noswoosh-pro?color=blue)](LICENSE)
 ![macOS 26.6+ / 27](https://img.shields.io/badge/macOS-26.6%2B%20%2F%2027-lightgrey)
 
-![Side-by-side: the macOS space-switch animation versus noswoosh switching instantly](assets/demo.gif)
+![对比：macOS 原生空间切换动画 vs noswoosh 瞬时切换](assets/demo.gif)
 
-## Install
+## 安装
 
 ```sh
 brew install --cask KylehsuXu/tap/noswoosh-pro
 ```
 
-Homebrew 7 refuses third-party taps until you trust them:
+Homebrew 7 默认不信任第三方 tap，需要先 trust：
 
 ```sh
 brew trust --cask KylehsuXu/tap/noswoosh-pro
@@ -42,28 +36,24 @@ brew install --cask KylehsuXu/tap/noswoosh-pro
 noswoosh-pro setup
 ```
 
-`noswoosh-pro setup` is the one-time system configuration — it disables the animated
-Ctrl+arrow shortcuts and installs the login daemon. It has to be a separate command
-because Homebrew sandboxes cask install steps: a `postflight` that ran it died with
-SIGKILL there, and the hotkeys stayed enabled.
+`noswoosh-pro setup` 做一次性的系统配置：关闭系统自带的动画 Ctrl+方向键快捷键，并安装登录守护进程。
+它必须单独执行，因为 Homebrew 会把 cask 的安装步骤放进沙箱 —— 之前在 `postflight` 里调用它的方案会
+被 SIGKILL 掉（静默失败），系统快捷键依然处于开启状态。
 
-Then **grant Accessibility permission** — macOS gates synthetic events behind it, and
-it's the one step that can't be scripted. Approve the prompt on first start; if you
-dismiss it, noswoosh opens **System Settings → Privacy & Security → Accessibility**
-for you, where you can add `/Applications/noswoosh-pro.app` yourself.
+然后**授予辅助功能权限**（macOS 用这道门禁管控合成事件，无法脚本化）：首次启动会弹窗，直接允许即可；
+如果误关了弹窗，noswoosh 会替你打开 **系统设置 → 隐私与安全性 → 辅助功能**，在那里手动添加
+`/Applications/noswoosh-pro.app`。
 
-That's it — the daemon picks the grant up within a second, and a **3-finger
-horizontal swipe**, **Ctrl+←/→** and **switching to an app on another space**
-(Cmd+Tab, skhd) all switch instantly.
+之后守护进程会在一秒内自动识别到授权。**三指滑动**、**Ctrl+←/→** 和**切换到其他空间的应用**
+（Cmd+Tab、skhd）都会变成瞬时切换。
 
-> **Upgrading:** `brew upgrade --cask noswoosh-pro` runs this cask's uninstall hook, which
-> removes the login daemon — run `noswoosh-pro setup` again afterwards. The Accessibility and
-> Device Control grants do survive it: releases are signed with a stable certificate.
+> 升级提示：`brew upgrade --cask noswoosh-pro` 会触发本 cask 的卸载钩子，登录守护进程会被一并移除，
+> 升级后重新执行一次 `noswoosh-pro setup` 即可。辅助功能 / 设备控制授权会保留（release 使用稳定证书签名）。
 
 <details>
-<summary><b>Build from source instead</b></summary>
+<summary><b>改为从源码构建</b></summary>
 
-Requires Xcode Command Line Tools (`xcode-select --install`).
+需要 Xcode Command Line Tools（`xcode-select --install`）。
 
 ```sh
 git clone https://github.com/KylehsuXu/noswoosh-pro.git
@@ -71,233 +61,186 @@ cd noswoosh
 ./scripts/install.sh
 ```
 
-The installer compiles `noswoosh.swift` to `~/.local/bin/`, runs `noswoosh-pro setup`, and
-installs a LaunchAgent (`xu.max.noswoosh-pro`) that logs to `~/Library/Logs/noswoosh-pro.log`.
-Grant Accessibility to `~/.local/bin/noswoosh-pro`.
+安装脚本会把 `noswoosh.swift` 编译到 `~/.local/bin/`，执行 `noswoosh-pro setup`，并安装一个
+LaunchAgent（`xu.max.noswoosh-pro`），日志写在 `~/Library/Logs/noswoosh-pro.log`。
+辅助功能权限要授予 `~/.local/bin/noswoosh-pro`。
 
-Set `NOSWOOSH_SIGN_IDENTITY="Developer ID Application: ..."` to codesign the local
-build, which keeps the grant across rebuilds.
+设置 `NOSWOOSH_SIGN_IDENTITY="Developer ID Application: ..."` 可以给本地构建签名，这样授权在重新构建后仍然有效。
 
 </details>
 
-## Usage
+## 使用
 
-Three ways to switch, all instant:
+三种方式，全部瞬时：
 
-- **3-finger horizontal swipe** — your normal Spaces gesture, minus the animation.
-  noswoosh intercepts the real swipe and replaces it with an instant switch;
-  vertical swipes (Mission Control, App Exposé) are left untouched.
-- **Ctrl+→ / Ctrl+←** — one space right/left.
-- **Activating an app that lives on another space** — Cmd+Tab, a Dock icon click, or any
-  hotkey that runs `open -b`, which is how [skhd](https://github.com/koekeishiya/skhd) app
-  shortcuts are written. The daemon sees the activation and moves to that space *before* the
-  app orders its window in, so there is no transition left to animate. (This one is the
-  fork's addition, and it is daemon-only: the `noswoosh-pro left/right` CLI exits too fast to
-  preempt anything.)
+- **三指左右滑动** —— 你熟悉的空间手势，只是没有动画。noswoosh 拦截真实滑动并替换成瞬时切换；
+  竖直方向（调度中心、App Exposé）不受影响。
+- **Ctrl+→ / Ctrl+←** —— 右/左切换一个空间。
+- **切换到位于其他空间的应用** —— Cmd+Tab、点 Dock 图标，或任何执行 `open -b` 的快捷键
+  （[skhd](https://github.com/koekeishiya/skhd) 的应用快捷键就是这个形式）。守护进程会在应用
+  把窗口 order in 之前先切到那个空间，因此没有可播放的过渡动画。（这是本 fork 新增的能力，
+  且只在守护进程里生效：`noswoosh-pro left/right` CLI 退出太快，来不及抢占。）
 
-Movement is clamped at the first and last space, so there's no rubber-band bounce.
+在空间列表的首/末位会做边界钳制，所以不会出现橡皮筋回弹。
 
-Multi-display works exactly as it does without noswoosh: the switch applies to the
-display under the pointer, not the one holding keyboard focus. With "Displays have
-separate Spaces" off, all displays share one set and move together.
+多显示器行为与原生一致：切换作用于**鼠标指针所在**的显示器，而不是键盘焦点所在的显示器；
+关闭"显示器各自拥有独立空间"时，所有显示器共享一套空间并一起切换。
 
-A CLI is available for scripting and debugging:
+也可以把它当 CLI 用（脚本、调试）：
 
 ```sh
-noswoosh-pro list      # "space 2 of 4"
-noswoosh-pro right     # switch once and exit
+noswoosh-pro list      # 输出 "space 2 of 4"
+noswoosh-pro right     # 切一次然后退出
 noswoosh-pro left
-noswoosh-pro setup     # apply system config (teardown reverses it)
+noswoosh-pro setup     # 应用系统配置（teardown 可撤销）
 noswoosh-pro teardown
-noswoosh-pro version
+noswoosh-pro version     # 也支持 -v / --version
+noswoosh-pro --help      # 用法（-h 同义）
 ```
 
-For a custom shortcut, bind `noswoosh-pro left` / `noswoosh-pro right` in any hotkey tool that
-runs a command — [skhd](https://github.com/koekeishiya/skhd),
-[Karabiner-Elements](https://karabiner-elements.pqrs.org),
-[Hammerspoon](https://www.hammerspoon.org) or [Raycast](https://www.raycast.com). The
-switch lands in ~100ms either way, so there's no speed penalty versus the built-in
-Ctrl+←/→.
+想绑定自定义快捷键，就在任何"执行命令"的热键工具里绑定 `noswoosh-pro left` / `noswoosh-pro right`：
+[skhd](https://github.com/koekeishiya/skhd)、[Karabiner-Elements](https://karabiner-elements.pqrs.org)、
+[Hammerspoon](https://www.hammerspoon.org) 或 [Raycast](https://www.raycast.com)。
+一次切换大约 100ms 落地，和内置的 Ctrl+←/→ 相比没有速度损失。
 
-## How it works
+## 工作原理
 
-macOS has no supported way to disable *only* the space-switch slide animation:
+macOS 没有官方办法**只**关掉空间切换的滑动动画：
 
-- The old `defaults write com.apple.dock workspaces-swoosh-animation-off` died with
-  Lion (2011).
-- **Reduce Motion** works but is global — and it's a crossfade, not an instant cut.
-- Per-app accessibility settings (Reduce Motion for the Dock alone) exist on iOS, not
-  macOS.
-- yabai can do it, but only with SIP partially disabled.
+- 老的 `defaults write com.apple.dock workspaces-swoosh-animation-off` 从 Lion（2011）起就失效了。
+- **减弱动态效果**能用，但它是全局的，而且是交叉淡入淡出，不是瞬时切换。
+- 单独给 Dock 关动画的辅助功能设置在 iOS 上有，macOS 没有。
+- yabai 能做到，但需要部分关闭 SIP。
 
-noswoosh takes the approach used by
-[InstantSpaceSwitcher](https://github.com/jurplel/InstantSpaceSwitcher),
-[WhichSpace](https://github.com/gechr/WhichSpace) and BetterTouchTool: synthesize a
-Dock-swipe trackpad gesture with **near-zero progress and high velocity**. The switch
-runs through the Dock's own pipeline — so Mission Control, focus, wallpaper and Dock
-state all stay consistent — but the animation has zero distance to travel, making it
-instant.
+noswoosh 采用 [InstantSpaceSwitcher](https://github.com/jurplel/InstantSpaceSwitcher)、
+[WhichSpace](https://github.com/gechr/WhichSpace) 和 BetterTouchTool 的思路：合成一个
+**进度近乎为零、速度极高**的 Dock 触控板滑动手势。切换仍然走 Dock 自己的管线（因此调度中心、
+焦点、壁纸、Dock 状态都保持一致），但动画没有距离可走，于是表现为瞬时。
 
-Two input sources feed one switch core. An **event tap** watches for real 3-finger
-horizontal swipes, suppresses them before the Dock animates, and posts the instant
-switch — so a natural swipe still works, just without the slide. A Ctrl+arrow **hotkey**
-posts the same switch directly. The two are independent: if the tap is ever disabled by
-the system, Ctrl+←/→ keeps working.
+两个输入源汇入同一个切换核心：**事件 tap** 监听真实三指水平滑动，在 Dock 播放动画前把它吞掉并发出
+瞬时切换 —— 所以自然滑动依然可用，只是不再滑；**Ctrl+方向键热键**直接发出同一个切换。两者互相独立：
+即便 tap 被系统禁用，Ctrl+←/→ 依然工作。
 
-**macOS 27** tightened this up: it validates synthetic Dock swipes against a serialized
-IOHID payload the older technique doesn't carry, so pre-27 builds silently stop
-switching. noswoosh detects the running OS and, on 27, attaches that payload (layout
-reverse-engineered from [joshuarli/iss](https://github.com/joshuarli/iss)); on 26 it
-uses the original lightweight path unchanged.
+**macOS 27** 收紧了校验：合成 Dock 滑动必须携带一段序列化的 IOHID 载荷，老办法不带，于是 27 上会静默
+失效。noswoosh 运行时会检测系统版本，在 27 上附带这段载荷（布局逆自
+[joshuarli/iss](https://github.com/joshuarli/iss)），在 26 上沿用原来的轻量路径。
 
-> The name: *swoosh* is Apple's own word for the space-slide animation, from the
-> long-dead Snow Leopard setting `workspaces-swoosh-animation-off`. This is that
-> setting, resurrected.
+> 关于名字：*swoosh* 是 Apple 自己对空间滑动动画的称呼，来自早已消失的 Snow Leopard 设置
+> `workspaces-swoosh-animation-off`。这个项目就是把它复活。
 
-### Switching by app activation (this fork)
+### 应用激活时的抢占切换（本 fork 的能力）
 
-Upstream switches on gestures. This fork also switches when you *activate* an app that lives on
-another space — Cmd+Tab, a Dock icon click, or a hotkey that runs `open -b` (the shape every
-skhd app shortcut has). Activating such an app normally drags its space along with a slide; here
-the daemon notices the activation first and switches to that space itself, so by the time the app
-orders its window in the space is already current and the follow rule has nothing to animate.
+上游只在手势上做切换；本 fork 额外处理**激活一个位于其他空间的应用**：Cmd+Tab、点 Dock 图标，或任何
+执行 `open -b` 的快捷键（skhd 的应用快捷键都是这个形状）。正常情况激活这类应用会把它的空间一起拖过来，
+带一段滑动动画；这里守护进程会先察觉到激活，自己先切到那个空间，等应用把窗口 order in 时空间已经是当前
+空间，跟随规则也就没有东西可动画了。
 
-That preempt posts a real gesture too, and a synthetic swipe is not committed when it is handed
-to the Dock: the Dock's own space model reads the new space **~38ms later**. A second switch
-posted inside that window is computed from an index the Dock has already left, and at either end
-of the space list that is a swipe the Dock has to clamp — measured as a **~500ms black screen**,
-with the space list frozen until it recovers. So the daemon keeps **one switch in flight at a
-time**: it waits for the Dock's model to catch up before posting the next one, and a request
-arriving meanwhile is parked and re-evaluated from a fresh read on a 20ms tick instead of being
-posted blind. That is what lets a rapid burst of Cmd+Tab or skhd presses stay instant instead of
-going black, and it is why a burst sometimes coalesces to the app you ended on instead of
-bouncing through every intermediate one: the newest activation wins, on purpose.
+这次抢占同样要发一个真实手势，而合成滑动并不是"发出即生效"：Dock 自己的空间模型要 **约 38ms 之后**
+才读到新空间。在这个窗口内发出的第二个切换，方向是按 Dock 已经离开的 index 算出来的，一旦落在空间列表
+的两端，就是一次 Dock 必须 clamp 的滑动 —— 实测表现为**约 500ms 黑屏**，同时空间列表冻结直到恢复。
+因此守护进程**同一时刻只允许一个切换在途**：等 Dock 的模型确认之后才发下一个；这期间到达的请求先停放，
+20ms 后按最新一次读取重新评估，而不是盲发。这也是"快速连按 Cmd+Tab / skhd 依然瞬时、不再黑屏"的原因；
+同样地，连按时偶尔会直接落到你最后激活的那个应用所在的空间、而不是每个中间空间都弹一遍 —— 这是刻意的：
+最新的那次激活优先。
 
-### The empty-desktop yank
+### 空桌面被"拽走"的问题
 
-While building this we found a macOS behavior reproducible with plain native
-switching: **switch to a desktop with no windows, and ~400 ms later macOS yanks you to
-a different desktop.** The chain, confirmed in the Dock's log and by instrumenting
-app activations:
+上游在开发中发现了一个用原生切换也能复现的 macOS 行为：**切到一个没有任何窗口的桌面，约 400ms 后
+系统会把你拽到另一个桌面。** 链条（已在 Dock 日志与 app 激活埋点中确认）：
 
-1. Landing on a space with no windows, macOS picks some other app and activates it.
-2. That app orders its key window in — and that window lives on another space.
-3. The Dock's window-order follow rule fires (`switching to space N for window(...)
-   ordered on non-visible space`) and you're yanked to wherever that window lives.
+1. 落在一个没有窗口的空间时，macOS 会挑一个应用激活它。
+2. 该应用把主窗口 order in —— 而那个窗口在另一个空间上。
+3. Dock 的"窗口 order in 跟随"规则触发（日志里是 `switching to space N for window(...) ordered on
+   non-visible space`），于是你被拽到那个窗口所在的空间。
 
-The tempting fix is `defaults write com.apple.dock workspaces-auto-swoosh -bool NO`,
-which stops the Dock registering for that notification at all. noswoosh shipped that
-through 1.6.4 — and it costs you **Dock-icon-follow**, clicking a Dock icon to jump to
-the space its window is already on. Disassembling the Dock shows why the two can't be
-split: the rule's switcher has exactly *one* caller, that same notification block. One
-pref, both behaviors. (It's also a separate code path from the "switch to a Space with
-open windows when switching to an application" setting, `AppleSpacesSwitchOnActivate`
-— toggling that does *not* help.)
+省事的修法是 `defaults write com.apple.dock workspaces-auto-swoosh -bool NO`，让 Dock 根本不注册那个
+通知。noswoosh 在 1.6.4 之前就是这么干的 —— 代价是**点击 Dock 图标跳转到窗口所在空间**的能力一起没了。
+反汇编 Dock 能看到原因：这条规则的切换器只有一个调用者，就是那个通知块。一个偏好设置，两种行为，无法拆分。
 
-So since 1.7.0 noswoosh leaves the pref alone and removes the **cause** instead: the
-moment the daemon lands on a space with nothing to focus, it takes activation itself.
-macOS still activates its pick, but that app never gets to order its off-space window
-in first, so the follow never fires — measured margin is ~380 ms. Dock-icon-follow
-keeps working, natively, with all of the Dock's own semantics intact.
+所以从 1.7.0 起 noswoosh 不再动这个偏好，改为消除**起因**：一旦落在没有窗口可聚焦的空间，守护进程自己
+立刻抢下激活。macOS 依旧会激活它挑的应用，但那个应用来不及先把其他空间的窗口 order in，跟随规则也就
+不会触发 —— 实测余量约 380ms。Dock 图标跟随因此保持原生、语义完整。
 
-The daemon has no windows and no menu, so the menu bar stays with whatever macOS
-picked and nothing is visible. The only trace is that keystrokes typed at an empty
-desktop go nowhere — which is where they were already going.
+守护进程没有窗口也没有菜单栏，菜单栏仍归 macOS 挑的那个应用，视觉上没有任何变化；唯一的痕迹是空桌面上
+敲键盘不会进到任何地方 —— 而它本来也无处可去。
 
-**macOS 27 doesn't need this, and doesn't get it.** 27 activates Finder on a windowless
-landing; Finder owns the desktop and has no off-space window to order in, so the chain
-never starts. The guard is gated off on 27+ — running it there would only displace
-Finder, and on an empty desktop that's the app you want active.
+**macOS 27 不需要这个守卫，也不会得到它。** 27 在无窗口落点会激活 Finder，而 Finder 拥有桌面、没有
+其他空间的窗口可 order in，链条根本不会启动。守卫在 27+ 上被关闭 —— 在那里运行它只会把 Finder 挤掉，
+而空桌面上 Finder 正是你想要的激活对象。
 
-Two variants that seem like they should work and don't, recorded so nobody re-tries
-them: parking a real window on the destination space (verified resident — it still
-yanks, so emptiness is the trigger, not the cause), and taking activation *before* the
-switch (the switch re-activates macOS's pick on landing and wipes it out).
+两个看起来可行但实际无效的变体（记录在案，免得再试）：在目标空间放一个真实窗口（确认窗口已驻留，依旧
+会被拽走 —— 触发条件是"空"，不是"原因"），以及**在切换之前**抢激活（切换落地时会重新激活 macOS 挑的
+应用，把之前的激活抹掉）。
 
-## Troubleshooting
+## 疑难排查
 
-**Ctrl+arrows or swipes do nothing.** Check `~/Library/Logs/noswoosh-pro.log`. A
-`waiting for Accessibility permission` line as the last entry means the daemon still
-isn't trusted; once you grant it, the log shows `Accessibility granted` and the daemon
-restarts itself. A `could not create swipe event tap` line means the same thing — the
-tap needs Accessibility, and the restart after granting fixes it.
+**Ctrl+方向键或滑动没反应。** 看 `~/Library/Logs/noswoosh-pro.log`。最后一行是
+`waiting for Accessibility permission` 说明守护进程还没拿到授权；授予后日志会出现
+`Accessibility granted`，守护进程会自己重启。出现 `could not create swipe event tap` 也是同一件事 ——
+tap 需要辅助功能权限，授权后的那次重启会修复它。
 
-**The Accessibility checkbox won't stick.** Remove the entry with "−" and let the
-daemon re-trigger the prompt, then approve it. If it still won't take:
+**辅助功能里的勾选不生效 / 勾不住。** 用"−"删掉条目，让守护进程重新弹一次授权提示，再允许。如果仍然不行：
 
 ```sh
 launchctl kickstart -k gui/$(id -u)/xu.max.noswoosh-pro
 ```
 
-**Spaces switch in an unexpected order.** Turn off "Automatically rearrange Spaces
-based on most recent use" in System Settings → Desktop & Dock.
+**空间切换顺序不符合预期。** 关掉 系统设置 → 桌面与程序坞 里的"根据最近使用情况自动重新排列空间"。
 
-## Caveats
+## 已知限制
 
-- **macOS 26.0–26.5 is not supported** (Apple fixed the underlying bug by 26.6).
-  Those builds have a WindowServer race where a zero-travel synthetic switch drops the
-  destination space's window compositing surfaces: the switch itself works, but you can
-  land on a space whose windows never paint (blank wallpaper) until something re-orders
-  them. The full investigation — root cause, every attempted workaround (alternate event
-  shapes, phase pacing, surface pre-warming, post-landing heals, direct SkyLight
-  switching), and why each fails — is in
-  [issue #1](https://github.com/mmathys/noswoosh/issues/1). **The fix is to update
-  macOS to 26.6 or later.**
-- **Private APIs.** `SLSCopyManagedDisplaySpaces`, the undocumented gesture
-  `CGEventField`s, and the macOS 27 IOHID payload layout are all unsupported by Apple
-  and reverse-engineered — any macOS release can change them. When a release does, the
-  symptom is switches silently stopping; the fix is adapting the gesture payload (as the
-  26 → 27 change already required). noswoosh gates each path behind a runtime OS check so
-  a future break can be isolated to one path.
-- **Apple Silicon quirk.** The reference implementations use `FLT_TRUE_MIN` as the
-  gesture progress; that subnormal float is flushed to zero (sign lost) somewhere in the
-  event pipeline on Apple Silicon, making every switch go the same direction. This port
-  uses `1e-4`, which survives and is still visually zero. Both OS paths use it — the
-  macOS 27 path used full travel (`±1.0`) through 1.7.0, which switched correctly but
-  visibly slid; 1.7.1 made it near-zero there too.
+- **不支持 macOS 26.0–26.5**（Apple 在 26.6 修掉了底层 bug）。这些版本存在 WindowServer 竞态：
+  零位移的合成切换会丢掉目标空间的窗口合成表面 —— 切换本身成功，但你可能落在一个窗口永远画不出来
+  （只有壁纸）的空间上，直到有什么东西重新 order in 它们。完整调查（根因、所有尝试过的规避方案：
+  替换事件形状、分阶段节奏、表面预热、落地后修复、直接调用 SkyLight 切换，以及每一种为何失败）
+  见 [issue #1](https://github.com/mmathys/noswoosh/issues/1)。**解决办法是把 macOS 升级到 26.6 或更高。**
+- **私有 API。** `SLSCopyManagedDisplaySpaces`、未公开的手势 `CGEventField`、macOS 27 的 IOHID 载荷
+  布局都不受 Apple 支持且是逆向得到的 —— 任何一次系统更新都可能改变它们。真发生时的表现是切换静默失效；
+  修法是适配手势载荷（26 → 27 已经强制过一次）。noswoosh 把每条路径都放在运行时版本判断之后，
+  这样将来的失效可以定位到具体一条路径。
+- **Apple Silicon 的一个坑。** 参考实现用 `FLT_TRUE_MIN` 作为手势进度；这个次正规浮点数在 Apple Silicon
+  的事件管线里某个环节会被刷成零（符号丢失），导致每次切换都往同一个方向走。本实现用 `1e-4`，
+  它既能存活又仍然视觉为零。两条系统路径都用它 —— macOS 27 路径在 1.7.0 之前用的是满位移（`±1.0`），
+  方向正确但肉眼可见地滑动；1.7.1 起在 27 上也改成近乎为零。
 
-## Uninstall
+## 卸载
 
 ```sh
-brew uninstall --cask noswoosh-pro     # or: ./scripts/uninstall.sh, from source
+brew uninstall --cask noswoosh-pro     # 从源码安装的用：./scripts/uninstall.sh
 ```
 
-This stops the daemon, removes the LaunchAgent, and restores the system Ctrl+arrow
-shortcuts that `setup` disabled. Remove the Accessibility entry manually if you like.
+会停止守护进程、移除 LaunchAgent，并恢复 `setup` 关掉的系统 Ctrl+方向键快捷键。
+辅助功能里的条目可以自行删除。
 
-## Contributing
+## 参与贡献
 
-Issues and pull requests are welcome. The whole tool is one Swift file
-([`noswoosh.swift`](noswoosh.swift)); build it with:
+欢迎提 issue 和 PR。整个工具就是一个 Swift 文件（[`noswoosh.swift`](noswoosh.swift)），构建方式：
 
 ```sh
 swiftc noswoosh.swift -O -o noswoosh-pro \
     -F /System/Library/PrivateFrameworks -framework SkyLight
-./scripts/make-app-bundle.sh --out build     # assembles build/noswoosh-pro.app
+./scripts/make-app-bundle.sh --out build     # 组装出 build/noswoosh-pro.app
 ```
 
-Releases: bump `noswooshVersion`, commit, push, then tag `vX.Y.Z` **and dispatch the
-release workflow by hand** — a tag push does not trigger CI in this fork, so the tag on its own
-builds nothing. The workflow publishes the signed app and CLI zips; the Homebrew cask (version +
-sha256 of `noswoosh-pro-<version>.app.zip`) is updated by hand in
-[KylehsuXu/homebrew-tap](https://github.com/KylehsuXu/homebrew-tap) afterwards, because the
-automatic cask bump is gated on notarization, which this fork does not have.
+发布流程：改高 `noswooshVersion` → 提交 → 推送 → 打 `vX.Y.Z` tag，**并手动触发一次 release workflow**
+（本 fork 里 tag push 不会触发 CI，只打 tag 什么都不会构建）。workflow 会发布签名后的 app 与 CLI 压缩包；
+Homebrew cask（版本号 + `noswoosh-pro-<version>.app.zip` 的 sha256）之后在
+[KylehsuXu/homebrew-tap](https://github.com/KylehsuXu/homebrew-tap) 里手工更新，
+因为自动更新 cask 的步骤以公证（notarization）为前提，本 fork 没有公证。
 
-## Credits
+## 致谢
 
-- **Upstream: [mmathys/noswoosh](https://github.com/mmathys/noswoosh) by
-  [@mmathys](https://github.com/mmathys) — thank you.** Everything this fork works by is his:
-  the synthetic-gesture technique, the event tap that replaces a real swipe, the macOS 27
-  IOHID payload, the macOS 27 sign conventions, the empty-desktop yank guard, the installer,
-  the release pipeline and this documentation. `noswoosh-pro` adds exactly one feature on top
-  (the app-activation preempt) and follows upstream for everything else.
-- Gesture technique: [jurplel/InstantSpaceSwitcher](https://github.com/jurplel/InstantSpaceSwitcher)
-  (the `±FLT_TRUE_MIN` progress trick and three-phase gesture) and
-  [gechr/WhichSpace](https://github.com/gechr/WhichSpace).
-- macOS 27 IOHID payload and swipe-interception approach:
-  [joshuarli/iss](https://github.com/joshuarli/iss) (ISC).
-- Force-front technique: [koekeishiya/yabai](https://github.com/koekeishiya/yabai).
+- **上游：[mmathys/noswoosh](https://github.com/mmathys/noswoosh)，作者
+  [@mmathys](https://github.com/mmathys) —— 非常感谢。** 本 fork 能工作的每一部分都是他的成果：
+  合成手势技巧、替换真实滑动的事件 tap、macOS 27 的 IOHID 载荷、macOS 27 的读写符号约定、
+  空桌面 yank 守卫、安装脚本、发布流程以及这份文档。`noswoosh-pro` 只在其上增加了一个功能
+  （应用激活抢占），其余完全跟随上游。
+- 手势技巧：[jurplel/InstantSpaceSwitcher](https://github.com/jurplel/InstantSpaceSwitcher)
+  （`±FLT_TRUE_MIN` 进度技巧与三阶段手势）与 [gechr/WhichSpace](https://github.com/gechr/WhichSpace)。
+- macOS 27 的 IOHID 载荷与滑动拦截思路：
+  [joshuarli/iss](https://github.com/joshuarli/iss)（ISC 许可）。
+- 强制前置（force-front）技巧：[koekeishiya/yabai](https://github.com/koekeishiya/yabai)。
 
-## License
+## 许可
 
-MIT — see [LICENSE](LICENSE).
+MIT —— 见 [LICENSE](LICENSE)。
