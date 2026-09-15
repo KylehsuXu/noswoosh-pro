@@ -52,7 +52,7 @@ import ApplicationServices
 // Build: swiftc noswoosh.swift -O -o noswoosh \
 //          -F /System/Library/PrivateFrameworks -framework SkyLight
 
-let noswooshVersion = "1.8.0"
+let noswooshVersion = "1.8.1"
 
 // MARK: - Setup / teardown (system configuration, all user-level)
 
@@ -704,6 +704,60 @@ func isRightSwipe(_ direction: Double) -> Bool {
     direction > 0
 }
 
+// MARK: - Login daemon installation
+
+// The LaunchAgent lives here rather than in the Homebrew cask because Homebrew 7 sandboxes
+// cask install steps (see `setup`). Written from the app bundle so the plist points at a
+// real path whichever way the binary was invoked — /Applications/noswoosh-pro.app when the
+// cask installed it, or ~/.local/bin from a source install.
+let launchAgentLabel = "xu.max.noswoosh-pro"
+
+func installLaunchAgent() {
+    let executable = (Bundle.main.executablePath ?? CommandLine.arguments[0])
+    let exe = URL(fileURLWithPath: executable).standardizedFileURL.path
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    let plistPath = "\(home)/Library/LaunchAgents/\(launchAgentLabel).plist"
+    let logPath = "\(home)/Library/Logs/noswoosh-pro.log"
+    let plist = """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+        <key>Label</key>
+        <string>\(launchAgentLabel)</string>
+        <key>ProgramArguments</key>
+        <array>
+            <string>\(exe)</string>
+        </array>
+        <key>RunAtLoad</key>
+        <true/>
+        <key>KeepAlive</key>
+        <true/>
+        <key>ProcessType</key>
+        <string>Interactive</string>
+        <key>LimitLoadToSessionType</key>
+        <string>Aqua</string>
+        <key>StandardErrorPath</key>
+        <string>\(logPath)</string>
+    </dict>
+    </plist>
+    """
+    do {
+        try FileManager.default.createDirectory(atPath: "\(home)/Library/LaunchAgents",
+                                                withIntermediateDirectories: true)
+        try plist.write(toFile: plistPath, atomically: true, encoding: .utf8)
+    } catch {
+        FileHandle.standardError.write("could not write \(plistPath): \(error)\n".data(using: .utf8)!)
+        return
+    }
+    // bootout first so an existing agent picks up a moved or replaced binary; both calls
+    // may fail (nothing loaded / already loaded) — the bootstrap below is what matters.
+    _ = runTool("/bin/launchctl", ["bootout", "gui/\(getuid())/\(launchAgentLabel)"])
+    if !runTool("/bin/launchctl", ["bootstrap", "gui/\(getuid())", plistPath]) {
+        FileHandle.standardError.write("launchctl bootstrap failed — the daemon will start at next login\n".data(using: .utf8)!)
+    }
+}
+
 // MARK: - CLI modes
 
 let args = CommandLine.arguments
@@ -721,6 +775,13 @@ if args.count > 1 {
         exit(0)
     case "setup":
         setCtrlArrowShortcuts(enabled: false)
+        // Also install the login daemon. The Homebrew cask used to do this from its
+        // postflight, which no longer works: Homebrew 7 runs cask install steps inside a
+        // sandbox, and `setup`'s WindowServer/cfprefsd calls are killed with SIGKILL there
+        // (measured: hotkeys stayed enabled and the step died silently behind
+        // must_succeed). Sandboxed or not, the user is going to run this once anyway, so
+        // the whole "make it work" job lives here.
+        installLaunchAgent()
         // Versions 1.6.4 and earlier disabled the Dock's window-order space-follow
         // (workspaces-auto-swoosh) to suppress the empty-desktop yank. That also
         // killed Dock-icon-follow, because the Dock runs both off the same
@@ -734,8 +795,9 @@ if args.count > 1 {
         print("""
         noswoosh-pro setup complete:
           - system animated Ctrl+arrow shortcuts disabled (live + persisted)
-        Remaining: start the daemon (the cask installs and starts it; from source use the
-        LaunchAgent that install.sh writes) and grant it Accessibility permission.
+          - login daemon installed (\(launchAgentLabel)) and started
+        Remaining: grant Accessibility permission (System Settings > Privacy & Security >
+        Accessibility). The daemon prompts on its own within a second of starting.
         """)
         exit(0)
     case "teardown":
