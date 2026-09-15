@@ -1,11 +1,18 @@
 # noswoosh-pro
 
 > **Fork.** `noswoosh-pro` is [KylehsuXu](https://github.com/KylehsuXu)'s fork of
-> [mmathys/noswoosh](https://github.com/mmathys/noswoosh). Upstream already makes
-> **Ctrl+←/→ and 3-finger swipes** instant; this fork adds one thing on top: switching to an
-> app whose window lives on another space — **Cmd+Tab**, a Dock icon click, any `open -b`
-> hotkey — also arrives instantly, by moving to that space before the app orders its window
-> in. Everything else is upstream's work, kept in sync with `git merge upstream/main`.
+> [mmathys/noswoosh](https://github.com/mmathys/noswoosh), and it is upstream's work that makes
+> it work at all — the gesture technique, the swipe interception, the macOS 27 IOHID payload,
+> the empty-desktop yank guard and this README all come from there. **Thanks to
+> [Maximilian Mathys (@mmathys)](https://github.com/mmathys)** for building and maintaining it.
+>
+> Upstream already makes **Ctrl+←/→ and 3-finger swipes** instant. This fork adds one thing on
+> top of that: switching to an app whose window lives on another space — **Cmd+Tab**, a
+> **[skhd](https://github.com/koekeishiya/skhd) / `open -b` hotkey**, a Dock icon click — also
+> arrives instantly, by moving to that space before the app orders its window in. Everything
+> else is upstream's work, kept in sync with `git merge upstream/main`.
+>
+> 🇨🇳 [中文说明 / Chinese README](README.zh-CN.md)
 >
 > ```sh
 > brew install --cask KylehsuXu/tap/noswoosh-pro
@@ -15,8 +22,8 @@ Instant, animation-free switching between macOS Spaces (**3-finger swipe** or
 **Ctrl+←/→**). Works on **macOS 26.6+ and 27**, no SIP disabling, no global Reduce
 Motion.
 
-[![Latest release](https://img.shields.io/github/v/release/KylehsuXu/noswoosh?color=blue)](https://github.com/KylehsuXu/noswoosh/releases/latest)
-[![MIT license](https://img.shields.io/github/license/KylehsuXu/noswoosh?color=blue)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/KylehsuXu/noswoosh-pro?color=blue)](https://github.com/KylehsuXu/noswoosh-pro/releases/latest)
+[![MIT license](https://img.shields.io/github/license/KylehsuXu/noswoosh-pro?color=blue)](LICENSE)
 ![macOS 26.6+ / 27](https://img.shields.io/badge/macOS-26.6%2B%20%2F%2027-lightgrey)
 
 ![Side-by-side: the macOS space-switch animation versus noswoosh switching instantly](assets/demo.gif)
@@ -43,10 +50,15 @@ SIGKILL there, and the hotkeys stayed enabled.
 Then **grant Accessibility permission** — macOS gates synthetic events behind it, and
 it's the one step that can't be scripted. Approve the prompt on first start; if you
 dismiss it, noswoosh opens **System Settings → Privacy & Security → Accessibility**
-for you, where you can add `/Applications/noswoosh.app` yourself.
+for you, where you can add `/Applications/noswoosh-pro.app` yourself.
 
-That's it — the daemon picks the grant up within a second, and both a **3-finger
-horizontal swipe** and **Ctrl+←/→** switch spaces instantly.
+That's it — the daemon picks the grant up within a second, and a **3-finger
+horizontal swipe**, **Ctrl+←/→** and **switching to an app on another space**
+(Cmd+Tab, skhd) all switch instantly.
+
+> **Upgrading:** `brew upgrade --cask noswoosh-pro` runs this cask's uninstall hook, which
+> removes the login daemon — run `noswoosh-pro setup` again afterwards. The Accessibility and
+> Device Control grants do survive it: releases are signed with a stable certificate.
 
 <details>
 <summary><b>Build from source instead</b></summary>
@@ -54,7 +66,7 @@ horizontal swipe** and **Ctrl+←/→** switch spaces instantly.
 Requires Xcode Command Line Tools (`xcode-select --install`).
 
 ```sh
-git clone https://github.com/mmathys/noswoosh.git
+git clone https://github.com/KylehsuXu/noswoosh-pro.git
 cd noswoosh
 ./scripts/install.sh
 ```
@@ -70,12 +82,18 @@ build, which keeps the grant across rebuilds.
 
 ## Usage
 
-Two ways to switch, both instant:
+Three ways to switch, all instant:
 
 - **3-finger horizontal swipe** — your normal Spaces gesture, minus the animation.
   noswoosh intercepts the real swipe and replaces it with an instant switch;
   vertical swipes (Mission Control, App Exposé) are left untouched.
 - **Ctrl+→ / Ctrl+←** — one space right/left.
+- **Activating an app that lives on another space** — Cmd+Tab, a Dock icon click, or any
+  hotkey that runs `open -b`, which is how [skhd](https://github.com/koekeishiya/skhd) app
+  shortcuts are written. The daemon sees the activation and moves to that space *before* the
+  app orders its window in, so there is no transition left to animate. (This one is the
+  fork's addition, and it is daemon-only: the `noswoosh-pro left/right` CLI exits too fast to
+  preempt anything.)
 
 Movement is clamped at the first and last space, so there's no rubber-band bounce.
 
@@ -136,6 +154,25 @@ uses the original lightweight path unchanged.
 > long-dead Snow Leopard setting `workspaces-swoosh-animation-off`. This is that
 > setting, resurrected.
 
+### Switching by app activation (this fork)
+
+Upstream switches on gestures. This fork also switches when you *activate* an app that lives on
+another space — Cmd+Tab, a Dock icon click, or a hotkey that runs `open -b` (the shape every
+skhd app shortcut has). Activating such an app normally drags its space along with a slide; here
+the daemon notices the activation first and switches to that space itself, so by the time the app
+orders its window in the space is already current and the follow rule has nothing to animate.
+
+That preempt posts a real gesture too, and a synthetic swipe is not committed when it is handed
+to the Dock: the Dock's own space model reads the new space **~38ms later**. A second switch
+posted inside that window is computed from an index the Dock has already left, and at either end
+of the space list that is a swipe the Dock has to clamp — measured as a **~500ms black screen**,
+with the space list frozen until it recovers. So the daemon keeps **one switch in flight at a
+time**: it waits for the Dock's model to catch up before posting the next one, and a request
+arriving meanwhile is parked and re-evaluated from a fresh read on a 20ms tick instead of being
+posted blind. That is what lets a rapid burst of Cmd+Tab or skhd presses stay instant instead of
+going black, and it is why a burst sometimes coalesces to the app you ended on instead of
+bouncing through every intermediate one: the newest activation wins, on purpose.
+
 ### The empty-desktop yank
 
 While building this we found a macOS behavior reproducible with plain native
@@ -179,7 +216,7 @@ switch (the switch re-activates macOS's pick on landing and wipes it out).
 
 ## Troubleshooting
 
-**Ctrl+arrows or swipes do nothing.** Check `~/Library/Logs/noswoosh.log`. A
+**Ctrl+arrows or swipes do nothing.** Check `~/Library/Logs/noswoosh-pro.log`. A
 `waiting for Accessibility permission` line as the last entry means the daemon still
 isn't trusted; once you grant it, the log shows `Accessibility granted` and the daemon
 restarts itself. A `could not create swipe event tap` line means the same thing — the
@@ -189,7 +226,7 @@ tap needs Accessibility, and the restart after granting fixes it.
 daemon re-trigger the prompt, then approve it. If it still won't take:
 
 ```sh
-launchctl kickstart -k gui/$(id -u)/ax.max.noswoosh
+launchctl kickstart -k gui/$(id -u)/xu.max.noswoosh-pro
 ```
 
 **Spaces switch in an unexpected order.** Turn off "Automatically rearrange Spaces
@@ -234,15 +271,26 @@ Issues and pull requests are welcome. The whole tool is one Swift file
 ([`noswoosh.swift`](noswoosh.swift)); build it with:
 
 ```sh
-swiftc noswoosh.swift -O -o noswoosh \
+swiftc noswoosh.swift -O -o noswoosh-pro \
     -F /System/Library/PrivateFrameworks -framework SkyLight
+./scripts/make-app-bundle.sh --out build     # assembles build/noswoosh-pro.app
 ```
 
-Releases are cut by bumping `noswooshVersion` and pushing a matching `vX.Y.Z` tag;
-CI builds, signs and publishes the app and updates the Homebrew cask.
+Releases: bump `noswooshVersion`, commit, push, then tag `vX.Y.Z` **and dispatch the
+release workflow by hand** — a tag push does not trigger CI in this fork, so the tag on its own
+builds nothing. The workflow publishes the signed app and CLI zips; the Homebrew cask (version +
+sha256 of `noswoosh-pro-<version>.app.zip`) is updated by hand in
+[KylehsuXu/homebrew-tap](https://github.com/KylehsuXu/homebrew-tap) afterwards, because the
+automatic cask bump is gated on notarization, which this fork does not have.
 
 ## Credits
 
+- **Upstream: [mmathys/noswoosh](https://github.com/mmathys/noswoosh) by
+  [@mmathys](https://github.com/mmathys) — thank you.** Everything this fork works by is his:
+  the synthetic-gesture technique, the event tap that replaces a real swipe, the macOS 27
+  IOHID payload, the macOS 27 sign conventions, the empty-desktop yank guard, the installer,
+  the release pipeline and this documentation. `noswoosh-pro` adds exactly one feature on top
+  (the app-activation preempt) and follows upstream for everything else.
 - Gesture technique: [jurplel/InstantSpaceSwitcher](https://github.com/jurplel/InstantSpaceSwitcher)
   (the `±FLT_TRUE_MIN` progress trick and three-phase gesture) and
   [gechr/WhichSpace](https://github.com/gechr/WhichSpace).
