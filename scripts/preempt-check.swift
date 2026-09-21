@@ -75,6 +75,10 @@ func activate(_ bundleID: String) {
 func runCLI(_ arg: String) { _ = try? Process.run(URL(fileURLWithPath: cli), arguments: [arg]) }
 func settle(_ s: Double) { RunLoop.current.run(until: Date().addingTimeInterval(s)) }
 
+/// Simulate nothing: this script drives `NSRunningApplication.activate()`, which is the same
+/// notification skhd and Cmd+Tab produce. (There used to be a keystroke here, for a landing guard
+/// that keyed on "user input behind the activation" — that guard is gone; see the preempt.)
+
 /// Get onto `space` (one CLI step at a time, both directions tried).
 @discardableResult
 func ensureOn(_ space: UInt64) -> Bool {
@@ -143,6 +147,7 @@ guard startA != multiMain, windows(of: multi.processIdentifier).contains(where: 
     print("SKIP  layout does not exercise A: need \(multiBundle) with a window on the current space \(startA) and its largest window on another one (now \(multiMain))")
     exit(2)
 }
+// A is a user activation of an app that lives on another space.
 activate(multiBundle)
 let movedA = msUntilSpace(multiMain, limit: 1.5)
 report("A user activation is preempted",
@@ -156,29 +161,36 @@ guard let otherMain else { print("SKIP  \(otherBundle) has no window on any spac
 ensureOn(otherMain)
 let awayFrom = currentSpace()
 
-func activateAfterSwitch(delayAfterLanding: Double) -> (from: UInt64, to: UInt64, msBack: Double?) {
-    let (from, to) = stepCatchingLanding()
-    guard to != from else { return (from, to, nil) }
-    if delayAfterLanding > 0 { settle(delayAfterLanding) }
-    activate(otherBundle)
-    return (from, to, msUntilSpace(from, limit: 1.5))
-}
-
-// B: activate 40ms after the landing is visible — inside the ~26-80ms echo window, but past the
-// commit, so the park path cannot mask a preempt that should not have fired.
-ensureOn(otherMain)
-let b = activateAfterSwitch(delayAfterLanding: 0.04)
-report("B landing activation is not followed",
-       b.from == otherMain && b.to != b.from && (b.msBack == nil || b.msBack! > 300),
-       "space \(b.from) -> \(b.to), then back to \(b.from) in \(b.msBack.map { "\(Int($0))ms" } ?? ">1500ms") (our post would be < 150ms; macOS's own drag 320ms+ is not ours)")
+// ---- B: macOS's landing activation for the space we moved to must not move us back --------------
+// When a space becomes current, macOS activates the app that owns it — an app whose *main* window is
+// on the space we are on. The preempt must answer "already on" and post nothing; the "flash and
+// return" was the frontmost-window rule pointing at WeChat's 280x380 chat window on the space we had
+// left. Activating the app that owns this space is exactly what macOS does here, so drive that.
+ensureOn(multiMain)
+activate(multiBundle)
+let movedB = msUntilSpace(otherMain, limit: 1.5)
+report("B landing activation does not move us back",
+       movedB == nil || movedB! > 300,
+       "space \(multiMain) -> \(otherMain) in \(movedB.map { "\(Int($0))ms" } ?? ">1500ms") (our post would be < 150ms; macOS's own drag 320ms+ is not ours)")
 settle(0.8)
 
-// C: the same activation ~200ms after the landing — the user pressing the next hotkey.
+// C: the reported cadence — two apps alternating at ~50-100ms, which is what pressing two skhd
+// bindings in a row looks like. Every activation must be preempted. The stopwatch versions of the
+// landing guard dropped the ones that landed inside their window (the 120ms build drops 2 of 4 at
+// this cadence), and the CLI cannot drive it: a process spawn is ~300ms.
 ensureOn(otherMain)
-let c = activateAfterSwitch(delayAfterLanding: 0.2)
-report("C a later activation is still preempted",
-       c.from == otherMain && c.to != c.from && c.msBack != nil && c.msBack! < 150,
-       "space \(c.from) -> \(c.to), then back to \(c.from) in \(c.msBack.map { "\(Int($0))ms" } ?? ">1500ms") (a 300ms landing window swallowed this in 1.8.9's first attempt)")
+var dropped = 0
+let rounds = 4
+for i in 0..<rounds {
+    let first = i % 2 == 0
+    let target = first ? multiMain : otherMain
+    activate(first ? multiBundle : otherBundle)
+    if msUntilSpace(target, limit: 1.2).map({ $0 > 150 }) ?? true { dropped += 1 }
+    settle(0.06)
+}
+report("C a burst of activations is all preempted",
+       dropped == 0,
+       "\(rounds - dropped)/\(rounds) activations switched in <150ms (both stopwatch versions of the landing guard swallowed the fast ones)")
 
 // Leave the user where we found them.
 if currentSpace() != awayFrom { runCLI("left"); settle(0.8) }

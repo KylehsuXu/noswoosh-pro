@@ -425,22 +425,8 @@ let refusalCooldown = 1.0
 // its pid instead: the latest activation is what the user asked for, and re-running the whole
 // preempt from a fresh read turns "that space already landed" into a no-op rather than a step.
 var pendingSteps = 0
-var pendingReach: (pid: pid_t, notifiedAt: Date)?
+var pendingReach: pid_t?
 var pendingTimer: Timer?
-
-// When the last noswoosh gesture was posted — ours, or the CLI's (the tap sees both, tagged).
-// macOS raises its activation for the app that owns a space ~12-26ms after that space became
-// current, i.e. ~26-80ms after the post that caused it, so an activation this soon afterwards is
-// bookkeeping for a switch the user already asked for rather than a request to follow an app.
-//
-// The window has to be *tight*. 1.8.9 used 300ms and swallowed the user's next hotkey press:
-// measured, a second skhd binding pressed 208-221ms after the first was dropped as a "landing
-// activation" and macOS animated it — the instability the user reported. 120ms covers the echo with
-// margin and leaves human double-presses alone. State-based variants are worse here: the daemon only
-// learns that one of its posts landed when it next reads the space list, which can be hundreds of ms
-// later, so "in flight" is stale exactly when it matters.
-var gesturePostedAt = Date.distantPast
-let landingWindow = 0.12
 
 func listShows(_ space: UInt64) -> Bool {
     guard let info = spaceInfo(), info.currentIndex >= 0,
@@ -504,30 +490,34 @@ func parkStep(right: Bool) {
     startPendingTimer()
 }
 
-func parkReach(pid: pid_t, notifiedAt: Date) {
-    pendingReach = (pid, notifiedAt)
+func parkReach(pid: pid_t) {
+    pendingReach = pid
     startPendingTimer()
 }
 
-// Apply a parked request as soon as the Dock catches up: a 20ms tick, against the ~320ms the
-// follow rule would take to animate the same switch. One request per tick, deliberately: an app
-// activation posts a gesture, which closes the gate again, so applying the parked steps straight
-// after it would be posting into *its* commit window — the clamp this whole section exists to
-// avoid, and measured as a black screen when both were parked together under a burst of swipes.
+// Apply a parked request as soon as the Dock catches up: a 5ms tick, against the ~320ms the follow
+// rule would take to animate the same switch. It has to be that short for the app-activation case,
+// not just short-ish: a burst of skhd presses ~50ms apart parks *every* request (the commit is
+// ~38ms), and a request that is still parked when the next activation arrives is dropped by design
+// (below) — measured at 20ms, one activation in four was lost that way and macOS animated it. One
+// request per tick, deliberately: an app activation posts a gesture, which closes the gate again, so
+// applying the parked steps straight after it would be posting into *its* commit window — the clamp
+// this whole section exists to avoid, and measured as a black screen when both were parked together
+// under a burst of swipes.
 func startPendingTimer() {
     guard pendingTimer == nil else { return }
-    pendingTimer = Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { timer in
+    pendingTimer = Timer.scheduledTimer(withTimeInterval: 0.005, repeats: true) { timer in
         guard dockCaughtUp() else { return }
-        if let reach = pendingReach {
+        if let pid = pendingReach {
             pendingReach = nil
             // The activation that parked this may have been superseded while we waited. Applying
             // it then would drag the user to the space of an app they are no longer looking at,
             // and the newer activation — already satisfied where they are — would fight it (its
             // window orders in on its own space, so the follow rule pulls them straight back,
             // animated). Same guard the old retry used for the same reason.
-            if NSWorkspace.shared.frontmostApplication?.processIdentifier == reach.pid,
-               let app = NSRunningApplication(processIdentifier: reach.pid) {
-                preemptAppActivationSpace(app, notifiedAt: reach.notifiedAt)
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+               let app = NSRunningApplication(processIdentifier: pid) {
+                preemptAppActivationSpace(app)
             }
             if pendingSteps == 0 { timer.invalidate(); pendingTimer = nil }
             return
@@ -562,7 +552,6 @@ func applySteps(_ steps: Int) {
 func postSwitchGesture(right: Bool) {
     // Gate on the daemon's own posting grant: see postingAllowed.
     guard postingAllowed else { return }
-    gesturePostedAt = Date()
     // A began/changed/ended sequence must complete; a partial one leaves the Dock
     // mid-gesture on a blank space. On the 27 path, build all three augmented
     // events up front and post nothing if any fails to build, so we never emit a
@@ -706,7 +695,7 @@ func preemptTrace(_ app: NSRunningApplication, _ note: @autoclosure () -> String
     log("\(formatter.string(from: Date())) preempt \(app.localizedName ?? "pid \(app.processIdentifier)"): \(note())")
 }
 
-func preemptAppActivationSpace(_ app: NSRunningApplication, notifiedAt: Date = Date()) {
+func preemptAppActivationSpace(_ app: NSRunningApplication) {
     let pid = app.processIdentifier
     // A newer activation supersedes anything parked for an older one, whatever this call then
     // decides: "nothing to do" is a decision about the app in front *now*.
@@ -730,7 +719,7 @@ func preemptAppActivationSpace(_ app: NSRunningApplication, notifiedAt: Date = D
     // already left (which is the clamp). Park it; the tick re-runs this whole decision.
     guard dockCaughtUp() else {
         preemptTrace(app, "a switch of ours is still uncommitted — deferring to \(target)")
-        parkReach(pid: pid, notifiedAt: notifiedAt)
+        parkReach(pid: pid)
         return
     }
     guard let info = spaceInfo(), let index = info.ids.firstIndex(of: target) else {
@@ -745,25 +734,29 @@ func preemptAppActivationSpace(_ app: NSRunningApplication, notifiedAt: Date = D
         preemptTrace(app, "nothing to do: already on \(target) (list index \(info.currentIndex) of \(info.ids.count))")
         return
     }
-    // Landing activation: when a space becomes current macOS activates the app that owns it — the
-    // Dock logs that app's app-state notification right before `becameCurrent(N)`. That is
-    // bookkeeping for a switch the user already asked for, not a request to follow an app, and
-    // following it switched straight back ~25ms after the landing: the reported "flash and return",
-    // on Ctrl+arrow and on a swipe alike, and on a two-space desktop it fired on every press
-    // because every step is a step to an end. `notifiedAt` is the notification's own time, so a
-    // request parked across a commit is judged on when it arrived rather than on a clock that has
-    // moved on.
+    // No landing-activation guard here, and that is deliberate — three attempts at one made things
+    // worse, so the echo is handled by *where this function aims* instead:
+    //   - macOS activates the app that owns the space that just became current (the Dock logs its
+    //     app-state notification right before `becameCurrent(N)`), i.e. an app whose main window is
+    //     on the space we are now on, so `spaceForApp` above answers "already on" and nothing is
+    //     posted. Measured after a CLI switch on 27.0: `preempt 微信: nothing to do: already on 5`.
+    //     The reported "flash and return" came from the *frontmost*-window rule, which for WeChat
+    //     pointed at its 280x380 chat window on the space we had left
+    //     (`preempt 微信: 5 -> 4: 1 step(s) left`); largest-window fixed that.
+    //   - window layout as a guard (1.8.8: stand down when the app has a window on the current
+    //     space) is the all-windows trap above in disguise: WeChat keeps its chat window on the
+    //     space you activate it *from*, so opt+w / Cmd+Tab to WeChat stopped preempting at all —
+    //     651 `preempt 微信: 4 -> 5` lines in 1.8.7's log, zero in 1.8.8's.
+    //   - a stopwatch cannot separate the two populations: macOS's echo lands 26-80ms after our
+    //     post, a user's next hotkey press at 92-108ms. 300ms (1.8.9) swallowed the press —
+    //     "still animates when I press quickly" — and 120ms did the same at a 100ms cadence.
+    //   - "user input behind it" looked like the answer but is not obtainable: skhd installs its
+    //     tap at the *HID* level in consuming mode (`otool -tV /opt/homebrew/bin/skhd` →
+    //     `mov w0, #0x1` = kCGHIDEventTap, `mov w2, #0x0` = default), and it starts at boot, so its
+    //     bound keys are swallowed before any tap we can install sees them. A synthetic key looks
+    //     fine because it is injected downstream of skhd — which is exactly why that guard passed
+    //     every scripted test and still animated for the user.
     //
-    // Note what this is *not*: it is not the app's window layout, and it is not a wide window. Both
-    // were tried and both are wrong — the window-layout version (1.8.8: stand down when the app has a
-    // window on the current space) is the all-windows trap above in disguise, since WeChat keeps its
-    // 280x380 chat window on the space you activate it *from*; and 300ms of stopwatch (1.8.9)
-    // swallowed the user's next hotkey press. See `landingWindow`.
-    let sinceSwitch = notifiedAt.timeIntervalSince(gesturePostedAt)
-    guard sinceSwitch > landingWindow else {
-        preemptTrace(app, "arrived \(Int(sinceSwitch * 1000))ms after a switch of ours — macOS's landing activation, nothing to preempt")
-        return
-    }
     // `SLSSpaceSetFrontPSN` repoints the activation's own space target at the space we just
     // switched to. It is not what makes the switch instant (a single-display A/B measured no
     // difference with it removed), so a pid whose PSN cannot be resolved must not cost us the
@@ -1153,11 +1146,6 @@ let swipeCallback: CGEventTapCallBack = { _, type, ev, _ in
     // Let our own synthetic events through without re-intercepting them.
     if (et == kCGSEventDockControl || et == kCGSEventGesture)
         && ev.getIntegerValueField(.eventSourceUserData) == noswooshEventTag {
-        // The CLI posts these from its own process, so this tap is the only place that knows a
-        // switch is in flight when it isn't ours: note it, or the landing activation macOS raises
-        // for the space it switches to is mistaken for a user activation and undone (the CLI
-        // reproduced the flash-and-return this way during diagnosis).
-        if et == kCGSEventDockControl { gesturePostedAt = Date() }
         return pass
     }
 
