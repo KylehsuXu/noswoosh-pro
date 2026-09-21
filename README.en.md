@@ -56,9 +56,33 @@ That's it — the daemon picks the grant up within a second, and a **3-finger
 horizontal swipe**, **Ctrl+←/→** and **switching to an app on another space**
 (Cmd+Tab, skhd) all switch instantly.
 
-> **Upgrading:** `brew upgrade --cask noswoosh-pro` runs this cask's uninstall hook, which
-> removes the login daemon — run `noswoosh-pro setup` again afterwards. The Accessibility and
-> Device Control grants do survive it: releases are signed with a stable certificate.
+### Upgrading
+
+```sh
+brew update                                  # refresh the tap first, or upgrade may still say "already installed"
+brew upgrade --cask noswoosh-pro             # the uninstall hook boots the daemon out and removes the LaunchAgent
+noswoosh-pro setup                           # so it has to be rebuilt: daemon back, system shortcuts off again
+```
+
+**You do not have to re-grant Accessibility.** Releases are signed with the same stable certificate,
+and TCC matches on the designated requirement (identifier + certificate root), so the existing grant
+still applies and the daemon picks it up at startup. Confirm with:
+
+```sh
+noswoosh-pro version                    # expect the new version
+launchctl list | grep noswoosh          # expect one line: <pid> 0 xu.max.noswoosh-pro
+tail -5 ~/Library/Logs/noswoosh-pro.log # only "waiting for Accessibility permission" means you must grant
+```
+
+If `brew update` itself fails — an unrelated formula's `Couldn't find manifest matching bottle
+checksum`, say — the chained upgrade never runs at all; skip auto-update:
+
+```sh
+HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade --cask noswoosh-pro
+```
+
+Installed from source: `git pull && ./scripts/install.sh`. With `NOSWOOSH_SIGN_IDENTITY` set the grant
+survives; without it the build is ad-hoc signed and the checkbox has to be ticked again.
 
 <details>
 <summary><b>Build from source instead</b></summary>

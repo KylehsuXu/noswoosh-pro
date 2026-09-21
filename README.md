@@ -47,8 +47,32 @@ noswoosh-pro setup
 之后守护进程会在一秒内自动识别到授权。**三指滑动**、**Ctrl+←/→** 和**切换到其他空间的应用**
 （Cmd+Tab、skhd）都会变成瞬时切换。
 
-> 升级提示：`brew upgrade --cask noswoosh-pro` 会触发本 cask 的卸载钩子，登录守护进程会被一并移除，
-> 升级后重新执行一次 `noswoosh-pro setup` 即可。辅助功能 / 设备控制授权会保留（release 使用稳定证书签名）。
+### 升级
+
+```sh
+brew update                                  # 先刷新 tap，否则 upgrade 可能还说"已是最新版本"
+brew upgrade --cask noswoosh-pro             # 卸载钩子会 bootout 守护进程并删掉 LaunchAgent
+noswoosh-pro setup                           # 所以必须重建：装回 LaunchAgent、再关一次系统快捷键
+```
+
+**辅助功能授权不用重新勾**：发布件用同一张稳定证书签名，TCC 按 designated requirement（identifier +
+证书根）匹配，原授权继续有效，守护进程启动即生效。升级后确认：
+
+```sh
+noswoosh-pro version                    # 期望是新版本号
+launchctl list | grep noswoosh          # 期望一行：<pid> 0 xu.max.noswoosh-pro
+tail -5 ~/Library/Logs/noswoosh-pro.log # 出现 "waiting for Accessibility permission" 才需要去授权
+```
+
+`brew update` 自己报错（例如无关 formula 的 `Couldn't find manifest matching bottle checksum`）会让后面
+`&&` 的升级根本不执行 —— 跳过 auto-update 即可：
+
+```sh
+HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade --cask noswoosh-pro
+```
+
+从源码安装的：`git pull && ./scripts/install.sh`。带上 `NOSWOOSH_SIGN_IDENTITY` 时授权同样保留，不带
+就是 ad-hoc 签名，需要重新勾一次。
 
 <details>
 <summary><b>改为从源码构建</b></summary>
