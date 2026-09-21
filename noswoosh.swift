@@ -52,7 +52,7 @@ import ApplicationServices
 // Build: swiftc noswoosh.swift -O -o noswoosh \
 //          -F /System/Library/PrivateFrameworks -framework SkyLight
 
-let noswooshVersion = "1.8.7"
+let noswooshVersion = "1.8.8"
 
 // MARK: - Setup / teardown (system configuration, all user-level)
 
@@ -609,10 +609,10 @@ func switchSpace(right: Bool) {
 // Single display, or "Displays have separate Spaces" off: the whole list is visible here
 // and nothing is skipped.
 
-// Space holding this app: the space of its *frontmost* ordinary window. CGWindowList is
-// ordered front to back, so the first layer-0 window of the pid that is on a space is the one
-// macOS itself will order in when the app activates — and therefore the space its follow rule
-// would drag us to.
+// Spaces this app's ordinary windows sit on, front to back. The first one is the space of the
+// app's *frontmost* window: CGWindowList is ordered front to back, so that is the window macOS
+// itself will order in when the app activates — and therefore the space its follow rule would
+// drag us to. The rest are what the landing-activation check in the preempt needs.
 //
 // This replaced a rule that required all of an app's windows to be on one space and gave up
 // otherwise. Requiring that looked prudent and was wrong: any app that keeps a second window
@@ -620,18 +620,19 @@ func switchSpace(right: Bool) {
 // space plus the main window over here is enough), and the only symptom is the animation
 // quietly coming back for that app. Windows on no space at all (the 1512x33 title-bar helpers
 // WeChat and Chrome both keep) are skipped, not counted as a space.
-func spaceForApp(_ pid: pid_t) -> UInt64? {
+func spacesForApp(_ pid: pid_t) -> [UInt64] {
     let list = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements],
                                           kCGNullWindowID) as? [[String: Any]] ?? []
+    var spaces: [UInt64] = []
     for w in list {
         guard (w[kCGWindowLayer as String] as? Int) == 0,
               (w[kCGWindowOwnerPID as String] as? Int) == Int(pid),
               let window = w[kCGWindowNumber as String] as? UInt32 else { continue }
-        let spaces = SLSCopySpacesForWindows(cid, 0x7, [window] as CFArray)
+        let ids = SLSCopySpacesForWindows(cid, 0x7, [window] as CFArray)
             .takeRetainedValue() as? [NSNumber] ?? []
-        if let space = spaces.first?.uint64Value { return space }
+        for id in ids where !spaces.contains(id.uint64Value) { spaces.append(id.uint64Value) }
     }
-    return nil
+    return spaces
 }
 
 // ProcessSerialNumber for a pid. GetProcessForPID is deprecated in C and marked
@@ -695,7 +696,8 @@ func preemptAppActivationSpace(_ app: NSRunningApplication) {
     // frames at 20ms). The list is the Dock's own model, and it is right whenever it has
     // finished moving; `dockCaughtUp` above is what establishes that, and until it does this
     // preempt parks the request instead of guessing (which is the same clamp by another route).
-    guard let target = spaceForApp(pid) else {
+    let appSpaces = spacesForApp(pid)
+    guard let target = appSpaces.first else {
         preemptTrace(app, "no window on any space (windowless app, or another display)")
         return
     }
@@ -715,9 +717,23 @@ func preemptAppActivationSpace(_ app: NSRunningApplication) {
     // Landing on the space you are already on is the common case (an app activated on its
     // own space) and is also what makes this safe to leave on: nothing to do, nothing
     // posted. A windowless app — noswoosh itself, when the yank guard activates us — fails
-    // at spaceForApp and lands here too.
+    // at spacesForApp and lands here too.
     guard index != info.currentIndex else {
         preemptTrace(app, "nothing to do: already on \(target) (list index \(info.currentIndex) of \(info.ids.count))")
+        return
+    }
+    // Landing activation: when a space becomes current macOS activates the app that owns it —
+    // the Dock logs that app's app-state notification right before `becameCurrent(N)` — and the
+    // app it picks is one with a window on the space we just arrived on. Its *frontmost* window
+    // can still be on the space we left (WeChat: main window here, the 280x380 chat window over
+    // there), so the frontmost-window answer above named the space we came from and this preempt
+    // switched straight back, ~25ms after the landing — the reported "flash and return", on
+    // Ctrl+arrow and swipe alike, with the space list never sitting still long enough for
+    // anything to confirm it. An app with a window on the space we are on is satisfied *here*:
+    // macOS is showing that window, so there is nothing to preempt. Not the old all-windows rule
+    // — an app with no window on this space still preempts, which is what that rule broke.
+    if appSpaces.contains(info.ids[info.currentIndex]) {
+        preemptTrace(app, "has a window on \(info.ids[info.currentIndex]) — macOS activated it for this space, nothing to preempt")
         return
     }
     // `SLSSpaceSetFrontPSN` repoints the activation's own space target at the space we just
