@@ -52,7 +52,7 @@ import ApplicationServices
 // Build: swiftc noswoosh.swift -O -o noswoosh \
 //          -F /System/Library/PrivateFrameworks -framework SkyLight
 
-let noswooshVersion = "1.8.8"
+let noswooshVersion = "1.8.9"
 
 // MARK: - Setup / teardown (system configuration, all user-level)
 
@@ -425,8 +425,22 @@ let refusalCooldown = 1.0
 // its pid instead: the latest activation is what the user asked for, and re-running the whole
 // preempt from a fresh read turns "that space already landed" into a no-op rather than a step.
 var pendingSteps = 0
-var pendingReach: pid_t?
+var pendingReach: (pid: pid_t, notifiedAt: Date)?
 var pendingTimer: Timer?
+
+// When the last noswoosh gesture was posted — ours, or the CLI's (the tap sees both, tagged).
+// macOS raises its activation for the app that owns a space ~12-26ms after that space became
+// current, i.e. ~26-80ms after the post that caused it, so an activation this soon afterwards is
+// bookkeeping for a switch the user already asked for rather than a request to follow an app.
+//
+// The window has to be *tight*. 1.8.9 used 300ms and swallowed the user's next hotkey press:
+// measured, a second skhd binding pressed 208-221ms after the first was dropped as a "landing
+// activation" and macOS animated it — the instability the user reported. 120ms covers the echo with
+// margin and leaves human double-presses alone. State-based variants are worse here: the daemon only
+// learns that one of its posts landed when it next reads the space list, which can be hundreds of ms
+// later, so "in flight" is stale exactly when it matters.
+var gesturePostedAt = Date.distantPast
+let landingWindow = 0.12
 
 func listShows(_ space: UInt64) -> Bool {
     guard let info = spaceInfo(), info.currentIndex >= 0,
@@ -490,8 +504,8 @@ func parkStep(right: Bool) {
     startPendingTimer()
 }
 
-func parkReach(pid: pid_t) {
-    pendingReach = pid
+func parkReach(pid: pid_t, notifiedAt: Date) {
+    pendingReach = (pid, notifiedAt)
     startPendingTimer()
 }
 
@@ -504,16 +518,16 @@ func startPendingTimer() {
     guard pendingTimer == nil else { return }
     pendingTimer = Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { timer in
         guard dockCaughtUp() else { return }
-        if let pid = pendingReach {
+        if let reach = pendingReach {
             pendingReach = nil
             // The activation that parked this may have been superseded while we waited. Applying
             // it then would drag the user to the space of an app they are no longer looking at,
             // and the newer activation — already satisfied where they are — would fight it (its
             // window orders in on its own space, so the follow rule pulls them straight back,
             // animated). Same guard the old retry used for the same reason.
-            if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
-               let app = NSRunningApplication(processIdentifier: pid) {
-                preemptAppActivationSpace(app)
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == reach.pid,
+               let app = NSRunningApplication(processIdentifier: reach.pid) {
+                preemptAppActivationSpace(app, notifiedAt: reach.notifiedAt)
             }
             if pendingSteps == 0 { timer.invalidate(); pendingTimer = nil }
             return
@@ -548,6 +562,7 @@ func applySteps(_ steps: Int) {
 func postSwitchGesture(right: Bool) {
     // Gate on the daemon's own posting grant: see postingAllowed.
     guard postingAllowed else { return }
+    gesturePostedAt = Date()
     // A began/changed/ended sequence must complete; a partial one leaves the Dock
     // mid-gesture on a blank space. On the 27 path, build all three augmented
     // events up front and post nothing if any fails to build, so we never emit a
@@ -609,30 +624,39 @@ func switchSpace(right: Bool) {
 // Single display, or "Displays have separate Spaces" off: the whole list is visible here
 // and nothing is skipped.
 
-// Spaces this app's ordinary windows sit on, front to back. The first one is the space of the
-// app's *frontmost* window: CGWindowList is ordered front to back, so that is the window macOS
-// itself will order in when the app activates — and therefore the space its follow rule would
-// drag us to. The rest are what the landing-activation check in the preempt needs.
+// Space holding this app as macOS sees it: the space of its *largest* ordinary window — the app's
+// main window, which is the one macOS orders in when the app activates, and therefore the space its
+// follow rule drags us to.
+//
+// "Frontmost window" was the rule here through 1.8.8 and it is wrong, measured against the Dock's
+// own follow rule on 27.0: activating WeChat from space 4 drags to space 5 (`switching to space 5
+// for window(cd) ... ordered on non-visible space`, window(cd) = its 1129x794 main window) even
+// though its 280x380 chat window is on space 4 and sits *in front* of it in CGWindowList. Reading
+// the frontmost window therefore named the space we were already on, the preempt stood down, and
+// macOS animated the switch instead — the animation coming back for that one app. Largest also
+// keeps Chrome's "translate this page?" popup (988x87) from dragging anyone to its space, which
+// the frontmost rule did whenever the popup happened to be in front.
 //
 // This replaced a rule that required all of an app's windows to be on one space and gave up
-// otherwise. Requiring that looked prudent and was wrong: any app that keeps a second window
-// elsewhere stopped preempting entirely (WeChat: a 280x380 chat window on the neighbouring
-// space plus the main window over here is enough), and the only symptom is the animation
-// quietly coming back for that app. Windows on no space at all (the 1512x33 title-bar helpers
-// WeChat and Chrome both keep) are skipped, not counted as a space.
-func spacesForApp(_ pid: pid_t) -> [UInt64] {
+// otherwise. Requiring that looked prudent and was wrong too: any app that keeps a second window
+// elsewhere stopped preempting entirely (WeChat, again), with the same symptom. Windows on no space
+// at all (the 1512x33 title-bar helpers WeChat and Chrome both keep) are skipped, not counted.
+func spaceForApp(_ pid: pid_t) -> UInt64? {
     let list = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements],
                                           kCGNullWindowID) as? [[String: Any]] ?? []
-    var spaces: [UInt64] = []
+    var best: (area: Double, space: UInt64)?
     for w in list {
         guard (w[kCGWindowLayer as String] as? Int) == 0,
               (w[kCGWindowOwnerPID as String] as? Int) == Int(pid),
               let window = w[kCGWindowNumber as String] as? UInt32 else { continue }
-        let ids = SLSCopySpacesForWindows(cid, 0x7, [window] as CFArray)
+        let spaces = SLSCopySpacesForWindows(cid, 0x7, [window] as CFArray)
             .takeRetainedValue() as? [NSNumber] ?? []
-        for id in ids where !spaces.contains(id.uint64Value) { spaces.append(id.uint64Value) }
+        guard let space = spaces.first?.uint64Value else { continue }
+        let bounds = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+        let area = ((bounds["Width"] as? Double) ?? 0) * ((bounds["Height"] as? Double) ?? 0)
+        if best == nil || area > best!.area { best = (area, space) }
     }
-    return spaces
+    return best?.space
 }
 
 // ProcessSerialNumber for a pid. GetProcessForPID is deprecated in C and marked
@@ -682,7 +706,7 @@ func preemptTrace(_ app: NSRunningApplication, _ note: @autoclosure () -> String
     log("\(formatter.string(from: Date())) preempt \(app.localizedName ?? "pid \(app.processIdentifier)"): \(note())")
 }
 
-func preemptAppActivationSpace(_ app: NSRunningApplication) {
+func preemptAppActivationSpace(_ app: NSRunningApplication, notifiedAt: Date = Date()) {
     let pid = app.processIdentifier
     // A newer activation supersedes anything parked for an older one, whatever this call then
     // decides: "nothing to do" is a decision about the app in front *now*.
@@ -696,8 +720,7 @@ func preemptAppActivationSpace(_ app: NSRunningApplication) {
     // frames at 20ms). The list is the Dock's own model, and it is right whenever it has
     // finished moving; `dockCaughtUp` above is what establishes that, and until it does this
     // preempt parks the request instead of guessing (which is the same clamp by another route).
-    let appSpaces = spacesForApp(pid)
-    guard let target = appSpaces.first else {
+    guard let target = spaceForApp(pid) else {
         preemptTrace(app, "no window on any space (windowless app, or another display)")
         return
     }
@@ -707,7 +730,7 @@ func preemptAppActivationSpace(_ app: NSRunningApplication) {
     // already left (which is the clamp). Park it; the tick re-runs this whole decision.
     guard dockCaughtUp() else {
         preemptTrace(app, "a switch of ours is still uncommitted — deferring to \(target)")
-        parkReach(pid: pid)
+        parkReach(pid: pid, notifiedAt: notifiedAt)
         return
     }
     guard let info = spaceInfo(), let index = info.ids.firstIndex(of: target) else {
@@ -717,23 +740,28 @@ func preemptAppActivationSpace(_ app: NSRunningApplication) {
     // Landing on the space you are already on is the common case (an app activated on its
     // own space) and is also what makes this safe to leave on: nothing to do, nothing
     // posted. A windowless app — noswoosh itself, when the yank guard activates us — fails
-    // at spacesForApp and lands here too.
+    // at spaceForApp and lands here too.
     guard index != info.currentIndex else {
         preemptTrace(app, "nothing to do: already on \(target) (list index \(info.currentIndex) of \(info.ids.count))")
         return
     }
-    // Landing activation: when a space becomes current macOS activates the app that owns it —
-    // the Dock logs that app's app-state notification right before `becameCurrent(N)` — and the
-    // app it picks is one with a window on the space we just arrived on. Its *frontmost* window
-    // can still be on the space we left (WeChat: main window here, the 280x380 chat window over
-    // there), so the frontmost-window answer above named the space we came from and this preempt
-    // switched straight back, ~25ms after the landing — the reported "flash and return", on
-    // Ctrl+arrow and swipe alike, with the space list never sitting still long enough for
-    // anything to confirm it. An app with a window on the space we are on is satisfied *here*:
-    // macOS is showing that window, so there is nothing to preempt. Not the old all-windows rule
-    // — an app with no window on this space still preempts, which is what that rule broke.
-    if appSpaces.contains(info.ids[info.currentIndex]) {
-        preemptTrace(app, "has a window on \(info.ids[info.currentIndex]) — macOS activated it for this space, nothing to preempt")
+    // Landing activation: when a space becomes current macOS activates the app that owns it — the
+    // Dock logs that app's app-state notification right before `becameCurrent(N)`. That is
+    // bookkeeping for a switch the user already asked for, not a request to follow an app, and
+    // following it switched straight back ~25ms after the landing: the reported "flash and return",
+    // on Ctrl+arrow and on a swipe alike, and on a two-space desktop it fired on every press
+    // because every step is a step to an end. `notifiedAt` is the notification's own time, so a
+    // request parked across a commit is judged on when it arrived rather than on a clock that has
+    // moved on.
+    //
+    // Note what this is *not*: it is not the app's window layout, and it is not a wide window. Both
+    // were tried and both are wrong — the window-layout version (1.8.8: stand down when the app has a
+    // window on the current space) is the all-windows trap above in disguise, since WeChat keeps its
+    // 280x380 chat window on the space you activate it *from*; and 300ms of stopwatch (1.8.9)
+    // swallowed the user's next hotkey press. See `landingWindow`.
+    let sinceSwitch = notifiedAt.timeIntervalSince(gesturePostedAt)
+    guard sinceSwitch > landingWindow else {
+        preemptTrace(app, "arrived \(Int(sinceSwitch * 1000))ms after a switch of ours — macOS's landing activation, nothing to preempt")
         return
     }
     // `SLSSpaceSetFrontPSN` repoints the activation's own space target at the space we just
@@ -1125,6 +1153,11 @@ let swipeCallback: CGEventTapCallBack = { _, type, ev, _ in
     // Let our own synthetic events through without re-intercepting them.
     if (et == kCGSEventDockControl || et == kCGSEventGesture)
         && ev.getIntegerValueField(.eventSourceUserData) == noswooshEventTag {
+        // The CLI posts these from its own process, so this tap is the only place that knows a
+        // switch is in flight when it isn't ours: note it, or the landing activation macOS raises
+        // for the space it switches to is mistaken for a user activation and undone (the CLI
+        // reproduced the flash-and-return this way during diagnosis).
+        if et == kCGSEventDockControl { gesturePostedAt = Date() }
         return pass
     }
 

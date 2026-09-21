@@ -42,39 +42,54 @@ Upstream, the tap bump is automatic; don't copy that expectation here until the
 
 ## Traps
 
-**Don't re-add the "all windows on one space" rule to the preempt.** `spacesForApp` takes the
-space of the app's *frontmost* window in `CGWindowList` order. Requiring every window to share
-one space looks safer and is silently useless: WeChat keeps a 280x380 chat window on the
-neighbouring space plus the main window elsewhere, and Chrome keeps a "translate this page?"
-popup, so the preempt simply stops firing for that app — the only symptom is the animation
-coming back for that one app, which reads like a regression in a build that didn't change.
-Windows on no space (the 1512x33 title-bar helpers both apps keep) are skipped, not counted.
+**Don't re-add the "all windows on one space" rule to the preempt.** `spaceForApp` takes the
+space of the app's *largest* window — its main window, which is the one macOS orders in. Requiring
+every window to share one space looks safer and is silently useless: WeChat keeps a 280x380 chat
+window on the neighbouring space plus the main window elsewhere, and Chrome keeps a "translate
+this page?" popup, so the preempt simply stops firing for that app — the only symptom is the
+animation coming back for that one app, which reads like a regression in a build that didn't
+change. Windows on no space (the 1512x33 title-bar helpers both apps keep) are skipped, not
+counted.
 
-**A landing activation is not a user activation.** When a space becomes current macOS activates
-the app that owns it — the Dock logs that app's app-state notification (`LSNotificationCode:
-0x200`) immediately before `becameCurrent(N)`. The preempt used to read that as the user
-activating an app: it asked which space the app's *frontmost* window is on, and for an app living
-on both spaces (WeChat: main window on the one you just arrived on, the 280x380 chat window on
-the one you left) that answer is the space you came from, so it switched straight back ~25ms
-after the landing. That is the reported "flash and return", identical on Ctrl+arrow and on a
-swipe, with the space list never sitting still long enough for anything to confirm it — and on a
-two-space desktop it fires on every press, because every step is a step to an end.
-`preemptAppActivationSpace` now stands down when the app already has a window on the space we are
-on: macOS is showing that window, so the activation is *for* this space. Not the all-windows rule
-above — an app with no window on the current space still preempts, which is what that rule broke.
-Cost, measured: an app whose *far* window happens to be its frontmost one no longer preempts, so
-macOS animates that switch instead.
+**"Frontmost window" is not the window macOS orders in — measured, twice.** Through 1.8.8
+`spaceForApp` took the first layer-0 window of the pid in `CGWindowList` order, on the theory that
+it is the window macOS orders in when the app activates. It is not: activating WeChat from space 4
+makes the Dock log `switching to space 5 for window(cd) app(0 5d05d) ordered on non-visible space`
+— window(cd) is its 1129x794 *main* window on space 5 — while its 280x380 chat window sits on
+space 4 *in front of* it in `CGWindowList`. The frontmost answer was therefore the space you were
+already on, the preempt stood down, and macOS animated the switch (measured 386-396ms versus 34ms
+when we preempt). Largest-window also stops Chrome's popup from dragging anyone to the popup's
+space whenever it happens to be in front. Cost: an app whose *largest* window is not the one macOS
+orders in would preempt to the wrong space — no such app measured here; `kAXMainWindowAttribute` is
+the more exact answer if one turns up.
 
-Verify it by eye with `NOSWOOSH_DEBUG=1`, driving the switch from the CLI (the hotkey can't be
-driven synthetically) — on the space holding WeChat's main window, activating WeChat used to log
-`preempt 微信: 5 -> 4: 1 step(s) left` and move the space, and now logs `has a window on 5 —
-macOS activated it for this space` and stays put. Red/green on 27.0, 3 spaces, 1.8.8.
+**A landing activation is not a user activation — and timing, not window layout, is what tells
+them apart.** When a space becomes current macOS activates the app that owns it — the Dock logs
+that app's app-state notification (`LSNotificationCode: 0x200`) immediately before
+`becameCurrent(N)`. The preempt read that as the user activating an app, followed it, and switched
+straight back ~25ms after the landing: the reported "flash and return", identical on Ctrl+arrow
+and on a swipe, and on a two-space desktop on every press, because every step is a step to an end.
+`preemptAppActivationSpace` now stands down when the activation arrives within `landingWindow`
+(0.3s) of a switch *we* just posted — ours or the CLI's, which the tap sees tagged either way.
+Measured: a landing activation arrives 12-40ms after the landing, i.e. ≤ ~80ms after the post.
 
-Sibling, not fixed: macOS can move the space back on its own. With the preempt disabled outright
-(`NOSWOOSH_APP_SWITCH=0`) landing on a space activated that space's app and then, ~30ms later,
-the focus-owning app, with `becameCurrent(oldSpace)` — no follow-rule line and no gesture of
-ours. Measured only with the pi harness as the focus owner, so it may be an artifact of that app;
-if a user still reports the flash while the preempt is standing down, measure this next.
+The 1.8.8 attempt at this guard was by window layout — stand down when the app already has a window
+on the current space — and it was the all-windows trap above in disguise: WeChat keeps its 280x380
+chat window on the space you activate it *from*, so `opt+w` / Cmd+Tab to WeChat stopped preempting
+at all and the animation came back. 1.8.7's log had 651 `preempt 微信: 4 -> 5` lines; 1.8.8 had
+zero, and the user reported it within a day. Do not gate this on which windows the app has.
+
+Verify it with `scripts/preempt-check.swift` — two timing measurements, both of which fail on the
+old behaviour and pass on this one (see "Checking your work" below). It needs an app that lives on
+both spaces (WeChat here) and one that lives on a single space, and it refuses to run if the window
+layout does not exercise the case rather than passing silently. By eye with `NOSWOOSH_DEBUG=1`: the
+landing case now logs `arrived Nms after a switch of ours — macOS's landing activation, nothing to
+preempt`, and a user activation of a multi-space app logs `preempt 微信: 4 -> 5: 1 step(s) right`.
+
+Residual, not covered: a switch macOS makes *itself* (Mission Control, a native Ctrl+arrow if
+`setup` was never run) posts no gesture we can see, so the landing activation after it is not
+recognised as one. It only bites when the app macOS activates there has its main window on the
+space you came from; measure the Dock's `non-visible space` lines first if a user reports it.
 
 **Don't tidy the private-API constants.** The numeric `CGEventField`s and the `1e-4`
 gesture progress are load-bearing and hard-won. `FLT_TRUE_MIN` — what the reference
@@ -262,6 +277,22 @@ The swipe path still cannot be driven synthetically: the daemon's tap *does* swa
 synthetic swipe, but the shapes differ from a real trackpad gesture in ways that mislead — a lone
 terminal-phase event with its dock fields cleared still serializes its original IOHID blob, which
 makes it look like the passthrough commits a step, and it does not. Verify swipe on a trackpad.
+
+**The preempt is checkable in two timing measurements.** `scripts/preempt-check.swift` drives the
+same `NSRunningApplication.activate()` path skhd and Cmd+Tab use, and asserts what the user
+actually sees — an instant switch lands in ~40ms, macOS's own follow rule takes 320ms+:
+
+```sh
+swift scripts/preempt-check.swift com.tencent.xinWeChat com.mitchellh.ghostty
+```
+
+Check A is the case 1.8.8 broke: activate an app that has a window on the current space *and* its
+main window on another one, and the switch must land in under 150ms. It needs that layout and says
+so instead of passing when it is absent. Check B is the flash-and-return: switch away with the CLI,
+then activate an app whose main window is on the space you just left (what macOS itself does when a
+space becomes current) — the space must **not** move within 300ms. Measured on 27.0, two spaces,
+1.8.9: A 35ms, B 379ms (macOS's drag, not our post). On 1.8.7 and on 1.8.8 both fail: A 386-396ms,
+B 30-33ms. No log parsing and no Screen Recording permission needed — the space id is the oracle.
 
 ### Testing on a macOS 27 VM
 
