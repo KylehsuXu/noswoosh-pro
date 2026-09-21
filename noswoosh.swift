@@ -877,8 +877,6 @@ func installLaunchAgent() {
         </array>
         <key>RunAtLoad</key>
         <true/>
-        <key>KeepAlive</key>
-        <true/>
         <key>ProcessType</key>
         <string>Interactive</string>
         <key>LimitLoadToSessionType</key>
@@ -973,10 +971,10 @@ func log(_ message: String) {
 
 // Accessibility trust is evaluated when the process starts and cached for its
 // lifetime, so a grant made while we are running does not take effect. Rather
-// than making the user restart the daemon by hand, poll and exit once trusted:
-// the LaunchAgent sets KeepAlive, so launchd immediately starts a fresh process
-// that picks the grant up. Run outside launchd there is nothing to restart us,
-// so say so instead.
+// than making the user restart the daemon by hand, poll and re-exec ourselves
+// once trusted: a fresh process image is what re-evaluates the grant. The
+// LaunchAgent carries no KeepAlive on purpose (1.8.8 — quitting has to stick),
+// so nothing else would ever bring us back.
 let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
 if !AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary) {
     log("waiting for Accessibility permission (System Settings > Privacy & Security > Accessibility)")
@@ -984,11 +982,12 @@ if !AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary) {
     var openedSettings = false
     Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
         if AXIsProcessTrusted() {
-            if getppid() == 1 {
-                log("Accessibility granted — restarting to apply it")
-            } else {
-                log("Accessibility granted — restart noswoosh to apply it")
-            }
+            log("Accessibility granted — restarting to apply it")
+            // execv only returns on failure; then the daemon is alive but still
+            // untrusted, which is worse than dead — say so and exit.
+            let selfPath = Bundle.main.executablePath ?? CommandLine.arguments[0]
+            execv(selfPath, CommandLine.unsafeArgv)
+            log("could not re-exec \(selfPath) — restart noswoosh by hand")
             exit(0)
         }
         secondsWaited += 1

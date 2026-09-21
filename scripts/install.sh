@@ -56,8 +56,6 @@ cat > "$PLIST" <<EOF
     </array>
     <key>RunAtLoad</key>
     <true/>
-    <key>KeepAlive</key>
-    <true/>
     <key>ProcessType</key>
     <string>Interactive</string>
     <key>LimitLoadToSessionType</key>
@@ -79,7 +77,8 @@ Done. One manual step remains:
   System Settings > Privacy & Security > Accessibility
     > "+" > Cmd+Shift+G > $BIN_DIR/noswoosh-pro
 
-  Then restart the daemon:
+  The daemon re-execs itself once the grant lands. If that doesn't take, restart
+  it by hand:
     launchctl kickstart -k gui/\$(id -u)/$LABEL
 
   If the checkbox toggle doesn't take (log still says "waiting for

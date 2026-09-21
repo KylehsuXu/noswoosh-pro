@@ -107,9 +107,11 @@ byte for byte, the same bytes run fine from another path, and launchd just repor
 that way, and reach for `rm`-then-copy (or a temp file plus `mv`) anywhere else.
 
 **Accessibility trust is cached for a process's lifetime.** That is the entire reason
-the daemon polls `AXIsProcessTrusted()` and exits once granted, letting launchd's
-`KeepAlive` restart it. It looks like a redundant loop; it isn't. Removing it brings
-back a manual `launchctl kickstart` step for every user.
+the daemon polls `AXIsProcessTrusted()` and `execv`s itself once granted — a fresh
+process image is what re-evaluates the grant. It looks like a redundant loop; it
+isn't. Since 1.8.8 the LaunchAgent carries **no** `KeepAlive`: quitting the daemon
+has to stick, so launchd will not bring it back and re-exec is the only thing keeping
+the grant from costing every user a manual `launchctl kickstart`.
 
 **Testing permission logic from a terminal lies to you.** TCC attributes a
 terminal-launched binary's request to the terminal, so it reports *trusted* even when
